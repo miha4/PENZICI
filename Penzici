@@ -214,7 +214,8 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
             
             'UPOŠTEVANJE PRAVILA ZA G
             If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") And dt >= gCutoffDate Then
-                LogDebug "  -> preskok (G ni dovoljen 45 dni pred upokojitvijo; meja: " & Format$(gCutoffDate, "dd.mm.yyyy") & ")"
+                LogDebug "  -> preskok (G/GL/GP ni dovoljen od vključno " & Format$(gCutoffDate, "dd.mm.yyyy") & _
+                         ", kar je točno " & DateDiff("d", gCutoffDate, retirementDate) & " dni pred upokojitvijo)"
                 GoTo NextCol
             End If
             'Če je prazna celica, jo preskoči
@@ -314,11 +315,11 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
             dt = DateSerial(yy, mm, d)
             
             If dt = retirementDate Then
-                MarkCellImportant dst.Cells(r, c), RGB(255, 199, 206), RGB(156, 0, 6)
+                MarkCellImportant dst.Cells(r, c), RGB(255, 199, 206), RGB(156, 0, 6), "UPOKOJITEV"
                 foundRetirement = True
                 LogDebug "Označen datum upokojitve v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
             ElseIf dt = cutoffDate Then
-                MarkCellImportant dst.Cells(r, c), RGB(255, 235, 156), RGB(156, 101, 0)
+                MarkCellImportant dst.Cells(r, c), RGB(255, 235, 156), RGB(156, 101, 0), "MEJA G (45 dni prej)"
                 foundCutoff = True
                 LogDebug "Označen datum 45 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
             End If
@@ -340,27 +341,32 @@ Private Sub ClearPreviousImportantDateHighlights(ByVal dst As Range)
     Dim cell As Range
     
     For Each cell In dst.Cells
+        If Not cell.Comment Is Nothing Then
+            cell.Comment.Delete
+        End If
+        
         If cell.Borders.Color = RGB(255, 0, 0) And cell.Borders.Weight = xlMedium Then
             cell.Interior.Pattern = xlNone
             cell.Font.ColorIndex = xlAutomatic
             cell.Font.Bold = False
-            cell.Borders.LineStyle = xlNone
+            cell.Borders.LineStyle = xlContinuous
+            cell.Borders.Weight = xlThin
+            cell.Borders.Color = RGB(0, 0, 0)
         End If
     Next cell
     
-    LogDebug "Počiščene prejšnje označitve ključnih datumov v VpisiDopuste."
+    LogDebug "Počiščene prejšnje označitve ključnih datumov in komentarji v VpisiDopuste."
 End Sub
 
-Private Sub MarkCellImportant(ByVal target As Range, ByVal fillColor As Long, ByVal fontColor As Long)
+Private Sub MarkCellImportant(ByVal target As Range, ByVal fillColor As Long, ByVal fontColor As Long, ByVal noteText As String)
     With target
         .Interior.Color = fillColor
         .Font.Color = fontColor
         .Font.Bold = True
-        With .Borders
-            .LineStyle = xlContinuous
-            .Weight = xlMedium
-            .Color = RGB(255, 0, 0)
-        End With
+        
+        If Not .Comment Is Nothing Then .Comment.Delete
+        .AddComment noteText
+        .Comment.Visible = False
     End With
 End Sub
 
