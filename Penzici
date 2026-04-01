@@ -56,6 +56,9 @@ Public Sub PripraviPredlogIzrabe()
     dst.Value = src.Value
     wS.Range("E16:E20").ClearContents
     LogDebug "VpisiDopuste in Razporejen dopust je počiščen."
+    
+    ClearPostRetirementPlan src, dst, retirementDate
+    HighlightImportantDates src, dst, retirementDate
 
     Dim i As Long
     'Zanka po vseh dopustih, ki jih je potrebno razporediti
@@ -157,7 +160,7 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
     Dim r As Long, c As Long
     Dim lastKnownYear As Long                           'v resnici števec stolpcev
 
-    For r = 1 To src.Rows.Count
+    For r = src.Rows.Count To 1 Step -1
         If remaining <= 0 Then Exit For
 
         Dim rowLabel As String                          ' meseci ?
@@ -172,7 +175,7 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
 
         LogDebug "[" & leaveCode & "] Pregled vrstice: " & yy & " " & rowLabel
 
-        For c = 1 To src.Columns.Count
+        For c = src.Columns.Count To 1 Step -1
             If remaining <= 0 Then Exit For
             
             'Preverjanje ali ta dan sploh obstaja
@@ -210,7 +213,7 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
             hasValidityWindow = True
             
             'UPOŠTEVANJE PRAVILA ZA G
-            If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "Gl" Or UCase$(leaveCode) = "Gp") And dt >= gCutoffDate Then
+            If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") And dt >= gCutoffDate Then
                 LogDebug "  -> preskok (G ni dovoljen 45 dni pred upokojitvijo; meja: " & Format$(gCutoffDate, "dd.mm.yyyy") & ")"
                 GoTo NextCol
             End If
@@ -255,6 +258,94 @@ NextRow:
     PlanOneLeaveItem = leaveQty - remaining
     
 End Function
+
+Private Sub ClearPostRetirementPlan(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            Dim d As Long
+            d = c
+            If d > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, d)
+            If dt > retirementDate Then
+                dst.Cells(r, c).ClearContents
+            End If
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+    
+    LogDebug "Po datumu upokojitve je plan v VpisiDopuste počiščen (>" & Format$(retirementDate, "dd.mm.yyyy") & ")."
+End Sub
+
+Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
+    Dim cutoffDate As Date
+    cutoffDate = DateAdd("d", -45, retirementDate)
+    
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    Dim foundRetirement As Boolean
+    Dim foundCutoff As Boolean
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            Dim d As Long
+            d = c
+            If d > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, d)
+            
+            If dt = retirementDate Then
+                MarkCellImportant dst.Cells(r, c), RGB(255, 199, 206), RGB(156, 0, 6)
+                foundRetirement = True
+                LogDebug "Označen datum upokojitve v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
+            ElseIf dt = cutoffDate Then
+                MarkCellImportant dst.Cells(r, c), RGB(255, 235, 156), RGB(156, 101, 0)
+                foundCutoff = True
+                LogDebug "Označen datum 45 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
+            End If
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+    
+    If Not foundRetirement Then
+        LogDebug "Datum upokojitve ni viden v območju VpisiDopuste: " & Format$(retirementDate, "dd.mm.yyyy")
+    End If
+    If Not foundCutoff Then
+        LogDebug "Datum 45 dni pred upokojitvijo ni viden v območju VpisiDopuste: " & Format$(cutoffDate, "dd.mm.yyyy")
+    End If
+End Sub
+
+Private Sub MarkCellImportant(ByVal target As Range, ByVal fillColor As Long, ByVal fontColor As Long)
+    With target
+        .Interior.Color = fillColor
+        .Font.Color = fontColor
+        .Font.Bold = True
+        With .Borders
+            .LineStyle = xlContinuous
+            .Weight = xlMedium
+            .Color = RGB(255, 0, 0)
+        End With
+    End With
+End Sub
 
 Private Function ReadDateFromCell(ByVal target As Range, ByVal label As String) As Date
     If Not IsDate(target.Value) Then
@@ -359,5 +450,3 @@ Private Sub LogDebug(ByVal msg As String)
         Debug.Print Format$(Now, "hh:nn:ss"); " | "; msg
     End If
 End Sub
-
-
