@@ -289,6 +289,8 @@ NextRow:
 End Sub
 
 Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
+    ClearPreviousImportantDateHighlights dst
+    
     Dim cutoffDate As Date
     cutoffDate = DateAdd("d", -45, retirementDate)
     
@@ -332,6 +334,21 @@ NextRow:
     If Not foundCutoff Then
         LogDebug "Datum 45 dni pred upokojitvijo ni viden v območju VpisiDopuste: " & Format$(cutoffDate, "dd.mm.yyyy")
     End If
+End Sub
+
+Private Sub ClearPreviousImportantDateHighlights(ByVal dst As Range)
+    Dim cell As Range
+    
+    For Each cell In dst.Cells
+        If cell.Borders.Color = RGB(255, 0, 0) And cell.Borders.Weight = xlMedium Then
+            cell.Interior.Pattern = xlNone
+            cell.Font.ColorIndex = xlAutomatic
+            cell.Font.Bold = False
+            cell.Borders.LineStyle = xlNone
+        End If
+    Next cell
+    
+    LogDebug "Počiščene prejšnje označitve ključnih datumov v VpisiDopuste."
 End Sub
 
 Private Sub MarkCellImportant(ByVal target As Range, ByVal fillColor As Long, ByVal fontColor As Long)
