@@ -120,7 +120,7 @@ Private Sub AddLeaveIfAny(ByRef col As Collection, ByVal leaveCode As String, By
         Err.Raise vbObjectError + 601, , "Veljavnost ni datum za tip " & leaveCode & "."
     End If
     'dodajanje v seznam
-    col.Add Array(leaveCode, CLng(qtyVal), CDate(validVal))
+    col.Add Array(leaveCode, CLng(qtyVal), DateValue(CDate(validVal)))
 End Sub
 
 Private Function ParseBlockedShifts(ByVal raw As String) As Object
@@ -166,11 +166,17 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
     Dim hasValidityWindow As Boolean                    ' Obstaja časovno okno, kjer se planiranje dopustov izzide
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
     gCutoffDate = DateAdd("d", -45, retirementDate)
+    
+    If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") Then
+        If DateAdd("d", -1, gCutoffDate) < effectiveEndDate Then
+            effectiveEndDate = DateAdd("d", -1, gCutoffDate)
+        End If
+    End If
 
     Dim r As Long, c As Long
     Dim lastKnownYear As Long                           'v resnici števec stolpcev
 
-    Dim candR() As Long, candC() As Long
+    Dim candR() As Long, candC() As Long, candDt() As Double
     Dim candCount As Long
     
     For r = 1 To src.Rows.Count
@@ -218,12 +224,6 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
             'Če najdemo vsaj 1 datum, ki je datumsko še mogoč
             hasValidityWindow = True
             
-            'UPOŠTEVANJE PRAVILA ZA G
-            If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") And dt >= gCutoffDate Then
-                LogDebug "  -> preskok (G/GL/GP ni dovoljen od vključno " & Format$(gCutoffDate, "dd.mm.yyyy") & _
-                         ", kar je točno " & DateDiff("d", gCutoffDate, retirementDate) & " dni pred upokojitvijo)"
-                GoTo NextCol
-            End If
             'Če je prazna celica, jo preskoči
             If Len(shiftCode) = 0 Then
                 LogDebug "  -> preskok (prazna celica)"
@@ -243,16 +243,26 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
             candCount = candCount + 1
             ReDim Preserve candR(1 To candCount)
             ReDim Preserve candC(1 To candCount)
+            ReDim Preserve candDt(1 To candCount)
             candR(candCount) = r
             candC(candCount) = c
+            candDt(candCount) = CDbl(dt)
 
 NextCol:
         Next c
 NextRow:
     Next r
     
-    Dim idx As Long
-    For idx = candCount To 1 Step -1
+    Dim idx As Long, j As Long
+    For idx = 1 To candCount - 1
+        For j = idx + 1 To candCount
+            If candDt(j) > candDt(idx) Then
+                SwapCandidate candR, candC, candDt, idx, j
+            End If
+        Next j
+    Next idx
+    
+    For idx = 1 To candCount
         If remaining <= 0 Then Exit For
         dst.Cells(candR(idx), candC(idx)).Value = leaveCode
         remaining = remaining - 1
@@ -393,7 +403,7 @@ Private Function ReadDateFromCell(ByVal target As Range, ByVal label As String) 
     If Not IsDate(target.Value) Then
         Err.Raise vbObjectError + 701, , "Neveljaven datum v " & label & "."
     End If
-    ReadDateFromCell = CDate(target.Value)
+    ReadDateFromCell = DateValue(CDate(target.Value))
 End Function
 'Uredi planItems po datumu veljavnosti, od najzgodnejšega proti najpoznejšemu.
 Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
@@ -471,6 +481,15 @@ Private Function LeavePriority(ByVal leaveCode As String) As Long
         Case Else: LeavePriority = 99
     End Select
 End Function
+
+Private Sub SwapCandidate(ByRef candR() As Long, ByRef candC() As Long, ByRef candDt() As Double, ByVal i As Long, ByVal j As Long)
+    Dim tmpL As Long
+    Dim tmpD As Double
+    
+    tmpL = candR(i): candR(i) = candR(j): candR(j) = tmpL
+    tmpL = candC(i): candC(i) = candC(j): candC(j) = tmpL
+    tmpD = candDt(i): candDt(i) = candDt(j): candDt(j) = tmpD
+End Sub
 
 Private Function ResolveYearMonthForRow(ByVal wS As Worksheet, ByVal absRow As Long, ByVal dayStartCol As Long, ByRef y As Long, ByRef m As Long, ByRef lastKnownYear As Long) As Boolean
     Dim monthText As String
