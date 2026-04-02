@@ -183,6 +183,10 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
         effectiveEndDate = retirementDate
     End If
     
+    Dim scheduleMinDate As Date, scheduleMaxDate As Date
+    GetScheduleDateBounds src, scheduleMinDate, scheduleMaxDate
+    effectiveEndDate = AlignEndDateToVisibleSchedule(effectiveEndDate, scheduleMinDate, scheduleMaxDate, retirementDate)
+    
     Dim hasValidityWindow As Boolean                    ' Obstaja časovno okno, kjer se planiranje dopustov izzide
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
     gCutoffDate = DateAdd("d", -45, retirementDate)
@@ -303,6 +307,54 @@ NextRow:
     'Vpišimo planirani dopust v E16-E20
     PlanOneLeaveItemWithWindow = leaveQty - remaining
     
+End Function
+
+Private Sub GetScheduleDateBounds(ByVal src As Range, ByRef minDate As Date, ByRef maxDate As Date)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    Dim found As Boolean
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            If c > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, c)
+            If Not found Then
+                minDate = dt
+                maxDate = dt
+                found = True
+            Else
+                If dt < minDate Then minDate = dt
+                If dt > maxDate Then maxDate = dt
+            End If
+NextCol:
+        Next c
+NextRow:
+    Next r
+End Sub
+
+Private Function AlignEndDateToVisibleSchedule(ByVal endDate As Date, ByVal scheduleMinDate As Date, ByVal scheduleMaxDate As Date, ByVal retirementDate As Date) As Date
+    Dim adjusted As Date
+    adjusted = endDate
+    
+    If adjusted < scheduleMinDate Then
+        adjusted = DateSerial(Year(scheduleMinDate), Month(adjusted), Day(adjusted))
+        If adjusted < scheduleMinDate Then
+            adjusted = DateAdd("yyyy", 1, adjusted)
+        End If
+        
+        If adjusted > scheduleMaxDate Or adjusted > retirementDate Then
+            adjusted = endDate
+        End If
+    End If
+    
+    AlignEndDateToVisibleSchedule = adjusted
 End Function
 
 Private Sub ClearPostRetirementPlan(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
