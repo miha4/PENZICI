@@ -148,6 +148,10 @@ End Function
 ' ========================== GLAVNI MOTOR MAKROJA: PISANJE DOPUSTOV =================================================
 '====================================================================================================================
 Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date) As Long
+    PlanOneLeaveItem = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, leaveCode, leaveQty, validUntil, DateSerial(1900, 1, 1), retirementDate, True)
+End Function
+
+Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date, ByVal windowStart As Date, ByVal windowEnd As Date, ByVal reverseOrder As Boolean) As Long
     'Koliko dopusta še ni razporejeno
     Dim remaining As Long
     remaining = leaveQty
@@ -277,7 +281,7 @@ NextRow:
     End If
     
     'Vpišimo planirani dopust v E16-E20
-    PlanOneLeaveItem = leaveQty - remaining
+    PlanOneLeaveItemWithWindow = leaveQty - remaining
     
 End Function
 
