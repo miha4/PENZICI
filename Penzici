@@ -35,8 +35,8 @@ Public Sub PripraviPredlogIzrabe()
     End If
     LogDebug "Število tipov dopusta za planiranje: " & planItems.Count
     
-    'Pozenemo SortLeaveItemsByValidity, kamor vnesem planItems - seznam vseh tipov dopustov, ki jih planiram
-    SortLeaveItemsByValidity planItems
+    'Pozenemo sortiranje po prioriteti: D, L, G, GL, GP
+    SortLeaveItemsByPriority planItems, True
 
     Dim src As Range
     Dim dst As Range
@@ -77,6 +77,72 @@ Public Sub PripraviPredlogIzrabe()
 
     LogDebug "=== KONEC PripraviPredlogIzrabe ==="
     MsgBox "Predlog izrabe je pripravljen v območju VpisiDopuste.", vbInformation
+    Exit Sub
+
+FailHandler:
+    LogDebug "NAPAKA: " & Err.Description
+    MsgBox "Napaka: " & Err.Description, vbCritical
+End Sub
+
+Public Sub PripraviPredlogIzrabeOdZadnjeIzmene()
+    On Error GoTo FailHandler
+
+    LogDebug "=== ZAGON PripraviPredlogIzrabeOdZadnjeIzmene ==="
+
+    Dim wS As Worksheet
+    Set wS = ActiveSheet
+    
+    Dim retirementDate As Date
+    retirementDate = ReadDateFromCell(wS.Range("E3"), "E3 (datum upokojitve)")
+    
+    Dim lastShiftDate As Date
+    lastShiftDate = ReadDateFromCell(wS.Range("F3"), "F3 (datum zadnje izmene)")
+    
+    If lastShiftDate > retirementDate Then
+        Err.Raise vbObjectError + 702, , "Datum v F3 ne sme biti po datumu upokojitve."
+    End If
+
+    Dim blocked As Object
+    Set blocked = ParseBlockedShifts(CStr(wS.Range("D12").Value))
+
+    Dim planItems As Collection
+    Set planItems = ReadLeaveItemsFixed(wS)
+    
+    If planItems.Count = 0 Then
+        MsgBox "Ni dopustov za planiranje (E5:E9).", vbExclamation
+        Exit Sub
+    End If
+    
+    'Prioriteta za planiranje od F3 naprej: GP, GL, G, L, D
+    SortLeaveItemsByPriority planItems, False
+
+    Dim src As Range
+    Dim dst As Range
+    
+    Set src = wS.Range("RazporedDelavca")
+    Set dst = wS.Range("VpisiDopuste")
+
+    If src.Rows.Count <> dst.Rows.Count Or src.Columns.Count <> dst.Columns.Count Then
+        Err.Raise vbObjectError + 501, , "Območji RazporedDelavca in VpisiDopuste morata biti enake velikosti."
+    End If
+    
+    dst.Value = src.Value
+    wS.Range("E16:E20").ClearContents
+    ClearPostRetirementPlan src, dst, retirementDate
+    HighlightImportantDates src, dst, retirementDate
+    
+    Dim i As Long
+    For i = 1 To planItems.Count
+        Dim item As Variant
+        item = planItems(i)
+        
+        Dim assignedQty As Long
+        assignedQty = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, CStr(item(0)), CLng(item(1)), CDate(item(2)), lastShiftDate, retirementDate, False)
+        WriteAssignedQty wS, CStr(item(0)), assignedQty
+    Next i
+
+    LogDebug "=== KONEC PripraviPredlogIzrabeOdZadnjeIzmene ==="
+    MsgBox "Predlog izrabe od datuma zadnje izmene je pripravljen v območju VpisiDopuste.", vbInformation
     Exit Sub
 
 FailHandler:
@@ -149,6 +215,10 @@ End Function
 ' ========================== GLAVNI MOTOR MAKROJA: PISANJE DOPUSTOV =================================================
 '====================================================================================================================
 Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date) As Long
+    PlanOneLeaveItem = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, leaveCode, leaveQty, validUntil, DateSerial(1900, 1, 1), retirementDate, True)
+End Function
+
+Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date, ByVal windowStart As Date, ByVal windowEnd As Date, ByVal reverseOrder As Boolean) As Long
     'Koliko dopusta še ni razporejeno
     Dim remaining As Long
     remaining = leaveQty
@@ -160,8 +230,10 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
     Dim r As Long, c As Long
     Dim lastKnownYear As Long                           'v resnici števec stolpcev
 
-    For r = src.Rows.Count To 1 Step -1
-        If remaining <= 0 Then Exit For
+    Dim candR() As Long, candC() As Long
+    Dim candCount As Long
+    
+    For r = 1 To src.Rows.Count
 
         Dim rowLabel As String                          ' meseci ?
         rowLabel = CStr(src.Worksheet.Cells(src.Row + r - 1, src.Column - 1).Value)
@@ -175,8 +247,7 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
 
         LogDebug "[" & leaveCode & "] Pregled vrstice: " & yy & " " & rowLabel
 
-        For c = src.Columns.Count To 1 Step -1
-            If remaining <= 0 Then Exit For
+        For c = 1 To src.Columns.Count
             
             'Preverjanje ali ta dan sploh obstaja
             Dim d As Long
@@ -199,9 +270,9 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
                      " | shift='" & shiftCode & "' | remaining=" & remaining
             
             'pogleda če je dan ustrezen:
-            'a) če je po datumu upokojitve
-            If dt > retirementDate Then
-                LogDebug "  -> preskok (po upokojitvi)"
+            'a) če je izven planirnega okna
+            If dt < windowStart Or dt > windowEnd Then
+                LogDebug "  -> preskok (izven planirnega okna)"
                 GoTo NextCol
             End If
             'b) če je po veljavnosti Dopusta
@@ -234,14 +305,31 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
                 GoTo NextCol
             End If
 
-            dst.Cells(r, c).Value = leaveCode
-            remaining = remaining - 1
-            LogDebug "  -> VPISANO: " & leaveCode & " na " & Format$(dt, "dd.mm.yyyy")
+            candCount = candCount + 1
+            ReDim Preserve candR(1 To candCount)
+            ReDim Preserve candC(1 To candCount)
+            candR(candCount) = r
+            candC(candCount) = c
 
 NextCol:
         Next c
 NextRow:
     Next r
+    
+    Dim idx As Long
+    If reverseOrder Then
+        For idx = candCount To 1 Step -1
+            If remaining <= 0 Then Exit For
+            dst.Cells(candR(idx), candC(idx)).Value = leaveCode
+            remaining = remaining - 1
+        Next idx
+    Else
+        For idx = 1 To candCount
+            If remaining <= 0 Then Exit For
+            dst.Cells(candR(idx), candC(idx)).Value = leaveCode
+            remaining = remaining - 1
+        Next idx
+    End If
 
     If remaining > 0 Then
         If (validUntil < Date) Or (Not hasValidityWindow) Then
@@ -256,7 +344,7 @@ NextRow:
     End If
     
     'Vpišimo planirani dopust v E16-E20
-    PlanOneLeaveItem = leaveQty - remaining
+    PlanOneLeaveItemWithWindow = leaveQty - remaining
     
 End Function
 
@@ -405,6 +493,64 @@ Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
         items.Add arr(i)
     Next i
 End Sub
+
+Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirementMode As Boolean)
+    Dim arr() As Variant
+    ReDim arr(1 To items.Count)
+
+    Dim i As Long, j As Long
+    For i = 1 To items.Count
+        arr(i) = items(i)
+    Next i
+
+    For i = 1 To UBound(arr) - 1
+        For j = i + 1 To UBound(arr)
+            Dim pI As Long, pJ As Long
+            pI = LeavePriority(CStr(arr(i)(0)), retirementMode)
+            pJ = LeavePriority(CStr(arr(j)(0)), retirementMode)
+            
+            If pJ < pI Or (pJ = pI And CDate(arr(j)(2)) < CDate(arr(i)(2))) Then
+                Dim tmp As Variant
+                tmp = arr(i)
+                arr(i) = arr(j)
+                arr(j) = tmp
+            End If
+        Next j
+    Next i
+
+    Do While items.Count > 0
+        items.Remove 1
+    Loop
+
+    For i = 1 To UBound(arr)
+        items.Add arr(i)
+    Next i
+End Sub
+
+Private Function LeavePriority(ByVal leaveCode As String, ByVal retirementMode As Boolean) As Long
+    Dim key As String
+    key = UCase$(Trim$(leaveCode))
+    
+    If retirementMode Then
+        Select Case key
+            Case "D": LeavePriority = 1
+            Case "L": LeavePriority = 2
+            Case "G": LeavePriority = 3
+            Case "GL": LeavePriority = 4
+            Case "GP": LeavePriority = 5
+            Case Else: LeavePriority = 99
+        End Select
+    Else
+        Select Case key
+            Case "GP": LeavePriority = 1
+            Case "GL": LeavePriority = 2
+            Case "G": LeavePriority = 3
+            Case "L": LeavePriority = 4
+            Case "D": LeavePriority = 5
+            Case Else: LeavePriority = 99
+        End Select
+    End If
+End Function
 
 Private Function ResolveYearMonthForRow(ByVal wS As Worksheet, ByVal absRow As Long, ByVal dayStartCol As Long, ByRef y As Long, ByRef m As Long, ByRef lastKnownYear As Long) As Boolean
     Dim monthText As String
