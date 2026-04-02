@@ -7,10 +7,24 @@ Private Const DEBUG_MODE As Boolean = True
 '============= PRIPRAVI PREDLOG IZRABE DOPUSTA PRED PENZIJO =============
 '========================================================================
 
+Public Sub ZazeniPredlogIzrabe()
+    On Error GoTo Konec
+    
+    frmLoading.Show vbModeless
+    DoEvents
+    SetLoaderProgress 0, "Začenjam..."
+    
+    Call PripraviPredlogIzrabe
+    
+Konec:
+    Unload frmLoading
+End Sub
+
 Public Sub PripraviPredlogIzrabe()
     On Error GoTo FailHandler
 
     LogDebug "=== ZAGON PripraviPredlogIzrabe ==="
+    SetLoaderProgress 5, "Začenjam..."
 
     Dim wS As Worksheet
     Set wS = ActiveSheet
@@ -30,19 +44,21 @@ Public Sub PripraviPredlogIzrabe()
     Set planItems = ReadLeaveItemsFixed(wS)
     
     If planItems.Count = 0 Then
+        SetLoaderProgress 100, "Ni dopustov za planiranje."
         MsgBox "Ni dopustov za planiranje (E5:E9).", vbExclamation
         Exit Sub
     End If
     LogDebug "Število tipov dopusta za planiranje: " & planItems.Count
     
-    'Pozenemo SortLeaveItemsByValidity, kamor vnesem planItems - seznam vseh tipov dopustov, ki jih planiram
-    SortLeaveItemsByValidity planItems
+    'Pozenemo sortiranje po prioriteti: D, L, G, GL, GP
+    SortLeaveItemsByPriority planItems, retirementDate
 
     Dim src As Range
     Dim dst As Range
     
     Set src = wS.Range("RazporedDelavca")
     Set dst = wS.Range("VpisiDopuste")
+    SetLoaderProgress 20, "Pripravljam območja..."
 
     LogDebug "Vir urnika: " & src.Address(False, False) & " (ime: " & GetRangeName(src) & ")"
     LogDebug "Cilj vpisa: " & dst.Address(False, False) & " (ime: VpisiDopuste)"
@@ -56,10 +72,15 @@ Public Sub PripraviPredlogIzrabe()
     dst.Value = src.Value
     wS.Range("E16:E20").ClearContents
     LogDebug "VpisiDopuste in Razporejen dopust je počiščen."
+    
+    ClearPostRetirementPlan src, dst, retirementDate
+    SetLoaderProgress 30, "Čistim in označujem datume..."
+    HighlightImportantDates src, dst, retirementDate
 
     Dim i As Long
     'Zanka po vseh dopustih, ki jih je potrebno razporediti
     For i = 1 To planItems.Count
+        SetLoaderProgress 30 + CLng((i - 1) * 60 / planItems.Count), "Planiram tip " & CStr(planItems(i)(0)) & "..."
         Dim item As Variant
         item = planItems(i) ' item(0)=Code, item(1)=Qty, item(2)=ValidUntil
         LogDebug "Začenjam tip: " & CStr(item(0)) & ", qty=" & CLng(item(1)) & ", veljavnost=" & Format$(CDate(item(2)), "dd.mm.yyyy")
@@ -72,15 +93,16 @@ Public Sub PripraviPredlogIzrabe()
         WriteAssignedQty wS, CStr(item(0)), assignedQty
     Next i
 
+    SetLoaderProgress 100, "Zaključujem..."
     LogDebug "=== KONEC PripraviPredlogIzrabe ==="
     MsgBox "Predlog izrabe je pripravljen v območju VpisiDopuste.", vbInformation
     Exit Sub
 
 FailHandler:
+    SetLoaderProgress 100, "Napaka."
     LogDebug "NAPAKA: " & Err.Description
     MsgBox "Napaka: " & Err.Description, vbCritical
 End Sub
-
 
 Private Function GetRangeName(ByVal rng As Range) As String
     Dim n As Name
@@ -118,7 +140,7 @@ Private Sub AddLeaveIfAny(ByRef col As Collection, ByVal leaveCode As String, By
         Err.Raise vbObjectError + 601, , "Veljavnost ni datum za tip " & leaveCode & "."
     End If
     'dodajanje v seznam
-    col.Add Array(leaveCode, CLng(qtyVal), CDate(validVal))
+    col.Add Array(leaveCode, CLng(qtyVal), DateValue(CDate(validVal)))
 End Sub
 
 Private Function ParseBlockedShifts(ByVal raw As String) As Object
@@ -150,15 +172,34 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
     Dim remaining As Long
     remaining = leaveQty
     
+    Dim effectiveEndDate As Date
+    If validUntil < retirementDate Then
+        effectiveEndDate = validUntil
+    Else
+        effectiveEndDate = retirementDate
+    End If
+    
+    Dim scheduleMinDate As Date, scheduleMaxDate As Date
+    GetScheduleDateBounds src, scheduleMinDate, scheduleMaxDate
+    effectiveEndDate = AlignEndDateToVisibleSchedule(effectiveEndDate, scheduleMinDate, scheduleMaxDate, retirementDate)
+    
     Dim hasValidityWindow As Boolean                    ' Obstaja časovno okno, kjer se planiranje dopustov izzide
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
     gCutoffDate = DateAdd("d", -45, retirementDate)
+    
+    If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") Then
+        If DateAdd("d", -1, gCutoffDate) < effectiveEndDate Then
+            effectiveEndDate = DateAdd("d", -1, gCutoffDate)
+        End If
+    End If
 
     Dim r As Long, c As Long
     Dim lastKnownYear As Long                           'v resnici števec stolpcev
 
+    Dim candR() As Long, candC() As Long, candDt() As Double
+    Dim candCount As Long
+    
     For r = 1 To src.Rows.Count
-        If remaining <= 0 Then Exit For
 
         Dim rowLabel As String                          ' meseci ?
         rowLabel = CStr(src.Worksheet.Cells(src.Row + r - 1, src.Column - 1).Value)
@@ -173,7 +214,6 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
         LogDebug "[" & leaveCode & "] Pregled vrstice: " & yy & " " & rowLabel
 
         For c = 1 To src.Columns.Count
-            If remaining <= 0 Then Exit For
             
             'Preverjanje ali ta dan sploh obstaja
             Dim d As Long
@@ -196,24 +236,14 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
                      " | shift='" & shiftCode & "' | remaining=" & remaining
             
             'pogleda če je dan ustrezen:
-            'a) če je po datumu upokojitve
-            If dt > retirementDate Then
-                LogDebug "  -> preskok (po upokojitvi)"
-                GoTo NextCol
-            End If
-            'b) če je po veljavnosti Dopusta
-            If dt > validUntil Then
-                LogDebug "  -> preskok (po veljavnosti " & Format$(validUntil, "dd.mm.yyyy") & ")"
+            'a) če je po zadnjem mogočem datumu za ta tip dopusta
+            If dt > effectiveEndDate Then
+                LogDebug "  -> preskok (po zadnjem možnem datumu: " & Format$(effectiveEndDate, "dd.mm.yyyy") & ")"
                 GoTo NextCol
             End If
             'Če najdemo vsaj 1 datum, ki je datumsko še mogoč
             hasValidityWindow = True
             
-            'UPOŠTEVANJE PRAVILA ZA G
-            If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "Gl" Or UCase$(leaveCode) = "Gp") And dt >= gCutoffDate Then
-                LogDebug "  -> preskok (G ni dovoljen 45 dni pred upokojitvijo; meja: " & Format$(gCutoffDate, "dd.mm.yyyy") & ")"
-                GoTo NextCol
-            End If
             'Če je prazna celica, jo preskoči
             If Len(shiftCode) = 0 Then
                 LogDebug "  -> preskok (prazna celica)"
@@ -230,19 +260,38 @@ Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal 
                 GoTo NextCol
             End If
 
-            dst.Cells(r, c).Value = leaveCode
-            remaining = remaining - 1
-            LogDebug "  -> VPISANO: " & leaveCode & " na " & Format$(dt, "dd.mm.yyyy")
+            candCount = candCount + 1
+            ReDim Preserve candR(1 To candCount)
+            ReDim Preserve candC(1 To candCount)
+            ReDim Preserve candDt(1 To candCount)
+            candR(candCount) = r
+            candC(candCount) = c
+            candDt(candCount) = CDbl(dt)
 
 NextCol:
         Next c
 NextRow:
     Next r
+    
+    Dim idx As Long, j As Long
+    For idx = 1 To candCount - 1
+        For j = idx + 1 To candCount
+            If candDt(j) > candDt(idx) Then
+                SwapCandidate candR, candC, candDt, idx, j
+            End If
+        Next j
+    Next idx
+    
+    For idx = 1 To candCount
+        If remaining <= 0 Then Exit For
+        dst.Cells(candR(idx), candC(idx)).Value = leaveCode
+        remaining = remaining - 1
+    Next idx
 
     If remaining > 0 Then
-        If (validUntil < Date) Or (Not hasValidityWindow) Then
-            LogDebug "[" & leaveCode & "] ZAKLJUČEK: ni mogoče planirati zaradi veljavnosti."
-            MsgBox "Za tip '" & leaveCode & "' planiranje ni možno: ta vrsta dopusta je že potekla.", vbInformation
+        If Not hasValidityWindow Then
+            LogDebug "[" & leaveCode & "] ZAKLJUČEK: ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy")
+            MsgBox "Za tip '" & leaveCode & "' planiranje ni možno: v tabeli ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy") & ".", vbInformation
         Else
             LogDebug "[" & leaveCode & "] ZAKLJUČEK: premalo dni, manjka " & remaining
             MsgBox "Za tip '" & leaveCode & "' ni dovolj prostih dni. Manjka: " & remaining, vbInformation
@@ -256,11 +305,169 @@ NextRow:
     
 End Function
 
+Private Sub GetScheduleDateBounds(ByVal src As Range, ByRef minDate As Date, ByRef maxDate As Date)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    Dim found As Boolean
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            If c > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, c)
+            If Not found Then
+                minDate = dt
+                maxDate = dt
+                found = True
+            Else
+                If dt < minDate Then minDate = dt
+                If dt > maxDate Then maxDate = dt
+            End If
+NextCol:
+        Next c
+NextRow:
+    Next r
+End Sub
+
+Private Function AlignEndDateToVisibleSchedule(ByVal endDate As Date, ByVal scheduleMinDate As Date, ByVal scheduleMaxDate As Date, ByVal retirementDate As Date) As Date
+    Dim adjusted As Date
+    adjusted = endDate
+    
+    If adjusted < scheduleMinDate Then
+        adjusted = DateSerial(Year(scheduleMinDate), Month(adjusted), Day(adjusted))
+        If adjusted < scheduleMinDate Then
+            adjusted = DateAdd("yyyy", 1, adjusted)
+        End If
+        
+        If adjusted > scheduleMaxDate Or adjusted > retirementDate Then
+            adjusted = endDate
+        End If
+    End If
+    
+    AlignEndDateToVisibleSchedule = adjusted
+End Function
+
+Private Sub ClearPostRetirementPlan(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    Dim dstArr As Variant
+    
+    dstArr = dst.Value2
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            Dim d As Long
+            d = c
+            If d > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, d)
+            If dt > retirementDate Then
+                dstArr(r, c) = vbNullString
+            End If
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+    
+    dst.Value2 = dstArr
+    LogDebug "Po datumu upokojitve je plan v VpisiDopuste počiščen (>" & Format$(retirementDate, "dd.mm.yyyy") & ", optimizirano z matriko)."
+End Sub
+
+Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
+    ClearPreviousImportantDateHighlights dst
+    
+    Dim cutoffDate As Date
+    cutoffDate = DateAdd("d", -45, retirementDate)
+    
+    Dim actualDiff As Long
+    actualDiff = DateDiff("d", cutoffDate, retirementDate)
+    If actualDiff <> 45 Then
+        Err.Raise vbObjectError + 703, , "Neujemanje MEJA G: razlika ni 45 dni (trenutno: " & actualDiff & ")."
+    End If
+    
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    Dim foundRetirement As Boolean
+    Dim foundCutoff As Boolean
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            Dim d As Long
+            d = c
+            If d > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, d)
+            
+            If dt = retirementDate Then
+                MarkCellImportant dst.Cells(r, c), "UPOKOJITEV"
+                foundRetirement = True
+                LogDebug "Označen datum upokojitve v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
+            ElseIf dt = cutoffDate Then
+                MarkCellImportant dst.Cells(r, c), "MEJA G (" & actualDiff & " dni prej)"
+                foundCutoff = True
+                LogDebug "Označen datum 45 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
+            End If
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+    
+    If Not foundRetirement Then
+        LogDebug "Datum upokojitve ni viden v območju VpisiDopuste: " & Format$(retirementDate, "dd.mm.yyyy")
+    End If
+    If Not foundCutoff Then
+        LogDebug "Datum 45 dni pred upokojitvijo ni viden v območju VpisiDopuste: " & Format$(cutoffDate, "dd.mm.yyyy")
+    End If
+End Sub
+
+Private Sub ClearPreviousImportantDateHighlights(ByVal dst As Range)
+    Dim cell As Range
+    
+    For Each cell In dst.Cells
+        If Not cell.Comment Is Nothing Then
+            cell.Comment.Delete
+            cell.Interior.Pattern = xlNone
+            cell.Font.ColorIndex = xlAutomatic
+            cell.Font.Bold = False
+        End If
+    Next cell
+    
+    LogDebug "Počiščene prejšnje označitve ključnih datumov in komentarji v VpisiDopuste."
+End Sub
+
+Private Sub MarkCellImportant(ByVal target As Range, ByVal noteText As String)
+    With target
+        If Not .Comment Is Nothing Then .Comment.Delete
+        .AddComment noteText
+        .Comment.Visible = False
+    End With
+End Sub
+
 Private Function ReadDateFromCell(ByVal target As Range, ByVal label As String) As Date
     If Not IsDate(target.Value) Then
         Err.Raise vbObjectError + 701, , "Neveljaven datum v " & label & "."
     End If
-    ReadDateFromCell = CDate(target.Value)
+    ReadDateFromCell = DateValue(CDate(target.Value))
 End Function
 'Uredi planItems po datumu veljavnosti, od najzgodnejšega proti najpoznejšemu.
 Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
@@ -290,6 +497,82 @@ Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
     For i = 1 To UBound(arr)
         items.Add arr(i)
     Next i
+End Sub
+
+Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirementDate As Date)
+    Dim arr() As Variant
+    ReDim arr(1 To items.Count)
+    
+    Dim gCutoffDate As Date
+    gCutoffDate = DateAdd("d", -45, retirementDate)
+
+    Dim i As Long, j As Long
+    For i = 1 To items.Count
+        arr(i) = items(i)
+    Next i
+
+    For i = 1 To UBound(arr) - 1
+        For j = i + 1 To UBound(arr)
+            Dim pI As Long, pJ As Long
+            Dim endI As Date, endJ As Date
+            
+            endI = EffectiveEndForSorting(CStr(arr(i)(0)), CDate(arr(i)(2)), retirementDate, gCutoffDate)
+            endJ = EffectiveEndForSorting(CStr(arr(j)(0)), CDate(arr(j)(2)), retirementDate, gCutoffDate)
+            pI = LeavePriority(CStr(arr(i)(0)))
+            pJ = LeavePriority(CStr(arr(j)(0)))
+            
+            If endJ < endI Or (endJ = endI And (pJ < pI Or (pJ = pI And CDate(arr(j)(2)) < CDate(arr(i)(2))))) Then
+                Dim tmp As Variant
+                tmp = arr(i)
+                arr(i) = arr(j)
+                arr(j) = tmp
+            End If
+        Next j
+    Next i
+
+    Do While items.Count > 0
+        items.Remove 1
+    Loop
+
+    For i = 1 To UBound(arr)
+        items.Add arr(i)
+    Next i
+End Sub
+
+Private Function EffectiveEndForSorting(ByVal leaveCode As String, ByVal validUntil As Date, ByVal retirementDate As Date, ByVal gCutoffDate As Date) As Date
+    Dim effectiveEnd As Date
+    effectiveEnd = IIf(validUntil < retirementDate, validUntil, retirementDate)
+    
+    If (UCase$(Trim$(leaveCode)) = "G" Or UCase$(Trim$(leaveCode)) = "GL" Or UCase$(Trim$(leaveCode)) = "GP") Then
+        If DateAdd("d", -1, gCutoffDate) < effectiveEnd Then
+            effectiveEnd = DateAdd("d", -1, gCutoffDate)
+        End If
+    End If
+    
+    EffectiveEndForSorting = effectiveEnd
+End Function
+
+Private Function LeavePriority(ByVal leaveCode As String) As Long
+    Dim key As String
+    key = UCase$(Trim$(leaveCode))
+    
+    Select Case key
+        Case "D": LeavePriority = 1
+        Case "L": LeavePriority = 2
+        Case "G": LeavePriority = 3
+        Case "GL": LeavePriority = 4
+        Case "GP": LeavePriority = 5
+        Case Else: LeavePriority = 99
+    End Select
+End Function
+
+Private Sub SwapCandidate(ByRef candR() As Long, ByRef candC() As Long, ByRef candDt() As Double, ByVal i As Long, ByVal j As Long)
+    Dim tmpL As Long
+    Dim tmpD As Double
+    
+    tmpL = candR(i): candR(i) = candR(j): candR(j) = tmpL
+    tmpL = candC(i): candC(i) = candC(j): candC(j) = tmpL
+    tmpD = candDt(i): candDt(i) = candDt(j): candDt(j) = tmpD
 End Sub
 
 Private Function ResolveYearMonthForRow(ByVal wS As Worksheet, ByVal absRow As Long, ByVal dayStartCol As Long, ByRef y As Long, ByRef m As Long, ByRef lastKnownYear As Long) As Boolean
@@ -360,4 +643,8 @@ Private Sub LogDebug(ByVal msg As String)
     End If
 End Sub
 
-
+Private Sub SetLoaderProgress(ByVal pct As Long, ByVal msg As String)
+    On Error Resume Next
+    frmLoading.UpdateProgress pct, msg
+    On Error GoTo 0
+End Sub
