@@ -51,7 +51,7 @@ Public Sub PripraviPredlogIzrabe()
     LogDebug "Število tipov dopusta za planiranje: " & planItems.Count
     
     'Pozenemo sortiranje po prioriteti: D, L, G, GL, GP
-    SortLeaveItemsByPriority planItems
+    SortLeaveItemsByPriority planItems, retirementDate
 
     Dim src As Range
     Dim dst As Range
@@ -344,6 +344,12 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
     Dim cutoffDate As Date
     cutoffDate = DateAdd("d", -45, retirementDate)
     
+    Dim actualDiff As Long
+    actualDiff = DateDiff("d", cutoffDate, retirementDate)
+    If actualDiff <> 45 Then
+        Err.Raise vbObjectError + 703, , "Neujemanje MEJA G: razlika ni 45 dni (trenutno: " & actualDiff & ")."
+    End If
+    
     Dim r As Long, c As Long
     Dim yy As Long, mm As Long
     Dim lastKnownYear As Long
@@ -364,11 +370,11 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
             dt = DateSerial(yy, mm, d)
             
             If dt = retirementDate Then
-                MarkCellImportant dst.Cells(r, c), RGB(255, 199, 206), RGB(156, 0, 6), "UPOKOJITEV"
+                MarkCellImportant dst.Cells(r, c), "UPOKOJITEV"
                 foundRetirement = True
                 LogDebug "Označen datum upokojitve v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
             ElseIf dt = cutoffDate Then
-                MarkCellImportant dst.Cells(r, c), RGB(255, 235, 156), RGB(156, 101, 0), "MEJA G (45 dni prej)"
+                MarkCellImportant dst.Cells(r, c), "MEJA G (" & actualDiff & " dni prej)"
                 foundCutoff = True
                 LogDebug "Označen datum 45 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
             End If
@@ -392,27 +398,17 @@ Private Sub ClearPreviousImportantDateHighlights(ByVal dst As Range)
     For Each cell In dst.Cells
         If Not cell.Comment Is Nothing Then
             cell.Comment.Delete
-        End If
-        
-        If cell.Borders.Color = RGB(255, 0, 0) And cell.Borders.Weight = xlMedium Then
             cell.Interior.Pattern = xlNone
             cell.Font.ColorIndex = xlAutomatic
             cell.Font.Bold = False
-            cell.Borders.LineStyle = xlContinuous
-            cell.Borders.Weight = xlThin
-            cell.Borders.Color = RGB(0, 0, 0)
         End If
     Next cell
     
     LogDebug "Počiščene prejšnje označitve ključnih datumov in komentarji v VpisiDopuste."
 End Sub
 
-Private Sub MarkCellImportant(ByVal target As Range, ByVal fillColor As Long, ByVal fontColor As Long, ByVal noteText As String)
+Private Sub MarkCellImportant(ByVal target As Range, ByVal noteText As String)
     With target
-        .Interior.Color = fillColor
-        .Font.Color = fontColor
-        .Font.Bold = True
-        
         If Not .Comment Is Nothing Then .Comment.Delete
         .AddComment noteText
         .Comment.Visible = False
@@ -455,9 +451,12 @@ Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
     Next i
 End Sub
 
-Private Sub SortLeaveItemsByPriority(ByRef items As Collection)
+Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirementDate As Date)
     Dim arr() As Variant
     ReDim arr(1 To items.Count)
+    
+    Dim gCutoffDate As Date
+    gCutoffDate = DateAdd("d", -45, retirementDate)
 
     Dim i As Long, j As Long
     For i = 1 To items.Count
@@ -467,10 +466,14 @@ Private Sub SortLeaveItemsByPriority(ByRef items As Collection)
     For i = 1 To UBound(arr) - 1
         For j = i + 1 To UBound(arr)
             Dim pI As Long, pJ As Long
+            Dim endI As Date, endJ As Date
+            
+            endI = EffectiveEndForSorting(CStr(arr(i)(0)), CDate(arr(i)(2)), retirementDate, gCutoffDate)
+            endJ = EffectiveEndForSorting(CStr(arr(j)(0)), CDate(arr(j)(2)), retirementDate, gCutoffDate)
             pI = LeavePriority(CStr(arr(i)(0)))
             pJ = LeavePriority(CStr(arr(j)(0)))
             
-            If pJ < pI Or (pJ = pI And CDate(arr(j)(2)) < CDate(arr(i)(2))) Then
+            If endJ < endI Or (endJ = endI And (pJ < pI Or (pJ = pI And CDate(arr(j)(2)) < CDate(arr(i)(2))))) Then
                 Dim tmp As Variant
                 tmp = arr(i)
                 arr(i) = arr(j)
@@ -487,6 +490,19 @@ Private Sub SortLeaveItemsByPriority(ByRef items As Collection)
         items.Add arr(i)
     Next i
 End Sub
+
+Private Function EffectiveEndForSorting(ByVal leaveCode As String, ByVal validUntil As Date, ByVal retirementDate As Date, ByVal gCutoffDate As Date) As Date
+    Dim effectiveEnd As Date
+    effectiveEnd = IIf(validUntil < retirementDate, validUntil, retirementDate)
+    
+    If (UCase$(Trim$(leaveCode)) = "G" Or UCase$(Trim$(leaveCode)) = "GL" Or UCase$(Trim$(leaveCode)) = "GP") Then
+        If DateAdd("d", -1, gCutoffDate) < effectiveEnd Then
+            effectiveEnd = DateAdd("d", -1, gCutoffDate)
+        End If
+    End If
+    
+    EffectiveEndForSorting = effectiveEnd
+End Function
 
 Private Function LeavePriority(ByVal leaveCode As String) As Long
     Dim key As String
