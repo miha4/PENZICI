@@ -156,6 +156,13 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
     Dim remaining As Long
     remaining = leaveQty
     
+    Dim effectiveEndDate As Date
+    If validUntil < retirementDate Then
+        effectiveEndDate = validUntil
+    Else
+        effectiveEndDate = retirementDate
+    End If
+    
     Dim hasValidityWindow As Boolean                    ' Obstaja časovno okno, kjer se planiranje dopustov izzide
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
     gCutoffDate = DateAdd("d", -45, retirementDate)
@@ -203,14 +210,9 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
                      " | shift='" & shiftCode & "' | remaining=" & remaining
             
             'pogleda če je dan ustrezen:
-            'a) če je izven planirnega okna
-            If dt < windowStart Or dt > windowEnd Then
-                LogDebug "  -> preskok (izven planirnega okna)"
-                GoTo NextCol
-            End If
-            'b) če je po veljavnosti Dopusta
-            If dt > validUntil Then
-                LogDebug "  -> preskok (po veljavnosti " & Format$(validUntil, "dd.mm.yyyy") & ")"
+            'a) če je po zadnjem mogočem datumu za ta tip dopusta
+            If dt > effectiveEndDate Then
+                LogDebug "  -> preskok (po zadnjem možnem datumu: " & Format$(effectiveEndDate, "dd.mm.yyyy") & ")"
                 GoTo NextCol
             End If
             'Če najdemo vsaj 1 datum, ki je datumsko še mogoč
@@ -257,9 +259,9 @@ NextRow:
     Next idx
 
     If remaining > 0 Then
-        If (validUntil < Date) Or (Not hasValidityWindow) Then
-            LogDebug "[" & leaveCode & "] ZAKLJUČEK: ni mogoče planirati zaradi veljavnosti."
-            MsgBox "Za tip '" & leaveCode & "' planiranje ni možno: ta vrsta dopusta je že potekla.", vbInformation
+        If Not hasValidityWindow Then
+            LogDebug "[" & leaveCode & "] ZAKLJUČEK: ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy")
+            MsgBox "Za tip '" & leaveCode & "' planiranje ni možno: v tabeli ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy") & ".", vbInformation
         Else
             LogDebug "[" & leaveCode & "] ZAKLJUČEK: premalo dni, manjka " & remaining
             MsgBox "Za tip '" & leaveCode & "' ni dovolj prostih dni. Manjka: " & remaining, vbInformation
