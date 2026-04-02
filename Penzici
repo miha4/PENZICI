@@ -70,6 +70,7 @@ Public Sub PripraviPredlogIzrabe()
     
     'pobriše VpisiDopuste matriko
     dst.Value = src.Value
+    dst.Font.Color = vbBlack
     wS.Range("E16:E20").ClearContents
     LogDebug "VpisiDopuste in Razporejen dopust je počiščen."
     
@@ -189,7 +190,7 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
     
     Dim hasValidityWindow As Boolean                    ' Obstaja časovno okno, kjer se planiranje dopustov izzide
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
-    gCutoffDate = DateAdd("d", -45, retirementDate)
+    gCutoffDate = DateAdd("d", -44, retirementDate)
     
     If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") Then
         If DateAdd("d", -1, gCutoffDate) < effectiveEndDate Then
@@ -288,7 +289,13 @@ NextRow:
     
     For idx = 1 To candCount
         If remaining <= 0 Then Exit For
-        dst.Cells(candR(idx), candC(idx)).Value = leaveCode
+        
+        With dst.Cells(candR(idx), candC(idx))
+            .Font.Color = vbBlack   ' reset
+            .Value = leaveCode
+            .Font.Color = vbRed     ' VSAK dopust = rdeče
+        End With
+        
         remaining = remaining - 1
     Next idx
 
@@ -394,11 +401,11 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
     ClearPreviousImportantDateHighlights dst
     
     Dim cutoffDate As Date
-    cutoffDate = DateAdd("d", -45, retirementDate)
+    cutoffDate = DateAdd("d", -44, retirementDate)
     
     Dim actualDiff As Long
     actualDiff = DateDiff("d", cutoffDate, retirementDate)
-    If actualDiff <> 45 Then
+    If actualDiff <> 44 Then
         Err.Raise vbObjectError + 703, , "Neujemanje MEJA G: razlika ni 45 dni (trenutno: " & actualDiff & ")."
     End If
     
@@ -451,8 +458,7 @@ Private Sub ClearPreviousImportantDateHighlights(ByVal dst As Range)
         If Not cell.Comment Is Nothing Then
             cell.Comment.Delete
             cell.Interior.Pattern = xlNone
-            cell.Font.ColorIndex = xlAutomatic
-            cell.Font.Bold = False
+            cell.Font.Bold = True
         End If
     Next cell
     
@@ -508,7 +514,7 @@ Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirement
     ReDim arr(1 To items.Count)
     
     Dim gCutoffDate As Date
-    gCutoffDate = DateAdd("d", -45, retirementDate)
+    gCutoffDate = DateAdd("d", -44, retirementDate)
 
     Dim i As Long, j As Long
     For i = 1 To items.Count
@@ -652,3 +658,4 @@ Private Sub SetLoaderProgress(ByVal pct As Long, ByVal msg As String)
     frmLoading.UpdateProgress pct, msg
     On Error GoTo 0
 End Sub
+
