@@ -36,7 +36,7 @@ Public Sub PripraviPredlogIzrabe()
     LogDebug "Število tipov dopusta za planiranje: " & planItems.Count
     
     'Pozenemo sortiranje po prioriteti: D, L, G, GL, GP
-    SortLeaveItemsByPriority planItems, True
+    SortLeaveItemsByPriority planItems
 
     Dim src As Range
     Dim dst As Range
@@ -83,73 +83,6 @@ FailHandler:
     LogDebug "NAPAKA: " & Err.Description
     MsgBox "Napaka: " & Err.Description, vbCritical
 End Sub
-
-Public Sub PripraviPredlogIzrabeOdZadnjeIzmene()
-    On Error GoTo FailHandler
-
-    LogDebug "=== ZAGON PripraviPredlogIzrabeOdZadnjeIzmene ==="
-
-    Dim wS As Worksheet
-    Set wS = ActiveSheet
-    
-    Dim retirementDate As Date
-    retirementDate = ReadDateFromCell(wS.Range("E3"), "E3 (datum upokojitve)")
-    
-    Dim lastShiftDate As Date
-    lastShiftDate = ReadDateFromCell(wS.Range("F3"), "F3 (datum zadnje izmene)")
-    
-    If lastShiftDate > retirementDate Then
-        Err.Raise vbObjectError + 702, , "Datum v F3 ne sme biti po datumu upokojitve."
-    End If
-
-    Dim blocked As Object
-    Set blocked = ParseBlockedShifts(CStr(wS.Range("D12").Value))
-
-    Dim planItems As Collection
-    Set planItems = ReadLeaveItemsFixed(wS)
-    
-    If planItems.Count = 0 Then
-        MsgBox "Ni dopustov za planiranje (E5:E9).", vbExclamation
-        Exit Sub
-    End If
-    
-    'Prioriteta za planiranje od F3 naprej: GP, GL, G, L, D
-    SortLeaveItemsByPriority planItems, False
-
-    Dim src As Range
-    Dim dst As Range
-    
-    Set src = wS.Range("RazporedDelavca")
-    Set dst = wS.Range("VpisiDopuste")
-
-    If src.Rows.Count <> dst.Rows.Count Or src.Columns.Count <> dst.Columns.Count Then
-        Err.Raise vbObjectError + 501, , "Območji RazporedDelavca in VpisiDopuste morata biti enake velikosti."
-    End If
-    
-    dst.Value = src.Value
-    wS.Range("E16:E20").ClearContents
-    ClearPostRetirementPlan src, dst, retirementDate
-    HighlightImportantDates src, dst, retirementDate
-    
-    Dim i As Long
-    For i = 1 To planItems.Count
-        Dim item As Variant
-        item = planItems(i)
-        
-        Dim assignedQty As Long
-        assignedQty = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, CStr(item(0)), CLng(item(1)), CDate(item(2)), lastShiftDate, retirementDate, False)
-        WriteAssignedQty wS, CStr(item(0)), assignedQty
-    Next i
-
-    LogDebug "=== KONEC PripraviPredlogIzrabeOdZadnjeIzmene ==="
-    MsgBox "Predlog izrabe od datuma zadnje izmene je pripravljen v območju VpisiDopuste.", vbInformation
-    Exit Sub
-
-FailHandler:
-    LogDebug "NAPAKA: " & Err.Description
-    MsgBox "Napaka: " & Err.Description, vbCritical
-End Sub
-
 
 Private Function GetRangeName(ByVal rng As Range) As String
     Dim n As Name
@@ -317,19 +250,11 @@ NextRow:
     Next r
     
     Dim idx As Long
-    If reverseOrder Then
-        For idx = candCount To 1 Step -1
-            If remaining <= 0 Then Exit For
-            dst.Cells(candR(idx), candC(idx)).Value = leaveCode
-            remaining = remaining - 1
-        Next idx
-    Else
-        For idx = 1 To candCount
-            If remaining <= 0 Then Exit For
-            dst.Cells(candR(idx), candC(idx)).Value = leaveCode
-            remaining = remaining - 1
-        Next idx
-    End If
+    For idx = candCount To 1 Step -1
+        If remaining <= 0 Then Exit For
+        dst.Cells(candR(idx), candC(idx)).Value = leaveCode
+        remaining = remaining - 1
+    Next idx
 
     If remaining > 0 Then
         If (validUntil < Date) Or (Not hasValidityWindow) Then
@@ -352,6 +277,9 @@ Private Sub ClearPostRetirementPlan(ByVal src As Range, ByVal dst As Range, ByVa
     Dim r As Long, c As Long
     Dim yy As Long, mm As Long
     Dim lastKnownYear As Long
+    Dim dstArr As Variant
+    
+    dstArr = dst.Value2
     
     For r = 1 To src.Rows.Count
         If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
@@ -366,7 +294,7 @@ Private Sub ClearPostRetirementPlan(ByVal src As Range, ByVal dst As Range, ByVa
             Dim dt As Date
             dt = DateSerial(yy, mm, d)
             If dt > retirementDate Then
-                dst.Cells(r, c).ClearContents
+                dstArr(r, c) = vbNullString
             End If
             
 NextCol:
@@ -374,7 +302,8 @@ NextCol:
 NextRow:
     Next r
     
-    LogDebug "Po datumu upokojitve je plan v VpisiDopuste počiščen (>" & Format$(retirementDate, "dd.mm.yyyy") & ")."
+    dst.Value2 = dstArr
+    LogDebug "Po datumu upokojitve je plan v VpisiDopuste počiščen (>" & Format$(retirementDate, "dd.mm.yyyy") & ", optimizirano z matriko)."
 End Sub
 
 Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date)
@@ -494,7 +423,7 @@ Private Sub SortLeaveItemsByValidity(ByRef items As Collection)
     Next i
 End Sub
 
-Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirementMode As Boolean)
+Private Sub SortLeaveItemsByPriority(ByRef items As Collection)
     Dim arr() As Variant
     ReDim arr(1 To items.Count)
 
@@ -506,8 +435,8 @@ Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirement
     For i = 1 To UBound(arr) - 1
         For j = i + 1 To UBound(arr)
             Dim pI As Long, pJ As Long
-            pI = LeavePriority(CStr(arr(i)(0)), retirementMode)
-            pJ = LeavePriority(CStr(arr(j)(0)), retirementMode)
+            pI = LeavePriority(CStr(arr(i)(0)))
+            pJ = LeavePriority(CStr(arr(j)(0)))
             
             If pJ < pI Or (pJ = pI And CDate(arr(j)(2)) < CDate(arr(i)(2))) Then
                 Dim tmp As Variant
@@ -527,29 +456,18 @@ Private Sub SortLeaveItemsByPriority(ByRef items As Collection, ByVal retirement
     Next i
 End Sub
 
-Private Function LeavePriority(ByVal leaveCode As String, ByVal retirementMode As Boolean) As Long
+Private Function LeavePriority(ByVal leaveCode As String) As Long
     Dim key As String
     key = UCase$(Trim$(leaveCode))
     
-    If retirementMode Then
-        Select Case key
-            Case "D": LeavePriority = 1
-            Case "L": LeavePriority = 2
-            Case "G": LeavePriority = 3
-            Case "GL": LeavePriority = 4
-            Case "GP": LeavePriority = 5
-            Case Else: LeavePriority = 99
-        End Select
-    Else
-        Select Case key
-            Case "GP": LeavePriority = 1
-            Case "GL": LeavePriority = 2
-            Case "G": LeavePriority = 3
-            Case "L": LeavePriority = 4
-            Case "D": LeavePriority = 5
-            Case Else: LeavePriority = 99
-        End Select
-    End If
+    Select Case key
+        Case "D": LeavePriority = 1
+        Case "L": LeavePriority = 2
+        Case "G": LeavePriority = 3
+        Case "GL": LeavePriority = 4
+        Case "GP": LeavePriority = 5
+        Case Else: LeavePriority = 99
+    End Select
 End Function
 
 Private Function ResolveYearMonthForRow(ByVal wS As Worksheet, ByVal absRow As Long, ByVal dayStartCol As Long, ByRef y As Long, ByRef m As Long, ByRef lastKnownYear As Long) As Boolean
