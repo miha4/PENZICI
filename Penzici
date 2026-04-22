@@ -658,4 +658,4 @@ Private Sub SetLoaderProgress(ByVal pct As Long, ByVal msg As String)
     frmLoading.UpdateProgress pct, msg
     On Error GoTo 0
 End Sub
-
+'---- END ---- 
