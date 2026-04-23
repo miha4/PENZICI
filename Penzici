@@ -80,6 +80,7 @@ Public Sub PripraviPredlogIzrabe()
 
     Dim i As Long
     'Zanka po vseh dopustih, ki jih je potrebno razporediti
+    Dim totalAssigned As Long
     For i = 1 To planItems.Count
         SetLoaderProgress 30 + CLng((i - 1) * 60 / planItems.Count), "Planiram tip " & CStr(planItems(i)(0)) & "..."
         Dim item As Variant
@@ -92,7 +93,10 @@ Public Sub PripraviPredlogIzrabe()
         assignedQty = PlanOneLeaveItem(src, dst, blocked, retirementDate, CStr(item(0)), CLng(item(1)), CDate(item(2)))
         'Zapisemo planirane dopuste
         WriteAssignedQty wS, CStr(item(0)), assignedQty
+        totalAssigned = totalAssigned + assignedQty
     Next i
+    
+    WarnIfLeavesCannotBeCombined src, dst, retirementDate, totalAssigned
 
     SetLoaderProgress 100, "Zaključujem..."
     LogDebug "=== KONEC PripraviPredlogIzrabe ==="
@@ -178,11 +182,7 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
     remaining = leaveQty
     
     Dim effectiveEndDate As Date
-    If validUntil < retirementDate Then
-        effectiveEndDate = validUntil
-    Else
-        effectiveEndDate = retirementDate
-    End If
+    effectiveEndDate = BaseEffectiveEndDate(leaveCode, validUntil, retirementDate)
     
     Dim scheduleMinDate As Date, scheduleMaxDate As Date
     GetScheduleDateBounds src, scheduleMinDate, scheduleMaxDate
@@ -192,11 +192,7 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
     Dim gCutoffDate As Date                             'omejitev za planiranje G-jev
     gCutoffDate = DateAdd("d", -44, retirementDate)
     
-    If (UCase$(leaveCode) = "G" Or UCase$(leaveCode) = "GL" Or UCase$(leaveCode) = "GP") Then
-        If DateAdd("d", -1, gCutoffDate) < effectiveEndDate Then
-            effectiveEndDate = DateAdd("d", -1, gCutoffDate)
-        End If
-    End If
+    effectiveEndDate = ApplyLeaveTypeHardStops(leaveCode, effectiveEndDate, retirementDate, gCutoffDate)
 
     Dim r As Long, c As Long
     Dim lastKnownYear As Long                           'v resnici števec stolpcev
@@ -551,16 +547,130 @@ End Sub
 
 Private Function EffectiveEndForSorting(ByVal leaveCode As String, ByVal validUntil As Date, ByVal retirementDate As Date, ByVal gCutoffDate As Date) As Date
     Dim effectiveEnd As Date
-    effectiveEnd = IIf(validUntil < retirementDate, validUntil, retirementDate)
-    
-    If (UCase$(Trim$(leaveCode)) = "G" Or UCase$(Trim$(leaveCode)) = "GL" Or UCase$(Trim$(leaveCode)) = "GP") Then
-        If DateAdd("d", -1, gCutoffDate) < effectiveEnd Then
-            effectiveEnd = DateAdd("d", -1, gCutoffDate)
-        End If
-    End If
+    effectiveEnd = BaseEffectiveEndDate(leaveCode, validUntil, retirementDate)
+    effectiveEnd = ApplyLeaveTypeHardStops(leaveCode, effectiveEnd, retirementDate, gCutoffDate)
     
     EffectiveEndForSorting = effectiveEnd
 End Function
+
+Private Function BaseEffectiveEndDate(ByVal leaveCode As String, ByVal validUntil As Date, ByVal retirementDate As Date) As Date
+    Dim candidate As Date
+    candidate = retirementDate
+    If validUntil < candidate Then candidate = validUntil
+    
+    Dim hardLDate As Date
+    hardLDate = HardStopDateForLeaveCode(leaveCode, retirementDate)
+    If hardLDate > 0 And hardLDate < candidate Then candidate = hardLDate
+    
+    BaseEffectiveEndDate = candidate
+End Function
+
+Private Function ApplyLeaveTypeHardStops(ByVal leaveCode As String, ByVal effectiveEnd As Date, ByVal retirementDate As Date, ByVal gCutoffDate As Date) As Date
+    Dim resultDate As Date
+    resultDate = effectiveEnd
+    
+    If (UCase$(Trim$(leaveCode)) = "G" Or UCase$(Trim$(leaveCode)) = "GL" Or UCase$(Trim$(leaveCode)) = "GP") Then
+        If DateAdd("d", -1, gCutoffDate) < resultDate Then
+            resultDate = DateAdd("d", -1, gCutoffDate)
+        End If
+    End If
+    
+    ApplyLeaveTypeHardStops = resultDate
+End Function
+
+Private Function HardStopDateForLeaveCode(ByVal leaveCode As String, ByVal retirementDate As Date) As Date
+    Select Case UCase$(Trim$(leaveCode))
+        Case "L"
+            HardStopDateForLeaveCode = DateSerial(Year(retirementDate), 6, 30)
+        Case Else
+            HardStopDateForLeaveCode = 0
+    End Select
+End Function
+
+Private Sub WarnIfLeavesCannotBeCombined(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date, ByVal totalAssignedLeaves As Long)
+    If totalAssignedLeaves <= 0 Then Exit Sub
+    
+    Dim scheduleDates() As Double
+    Dim scheduleR() As Long
+    Dim scheduleC() As Long
+    Dim scheduleCount As Long
+    
+    CollectRetirementEligibleShifts src, retirementDate, scheduleDates, scheduleR, scheduleC, scheduleCount
+    If scheduleCount = 0 Then Exit Sub
+    
+    SortSchedulesByDateDesc scheduleDates, scheduleR, scheduleC, scheduleCount
+    
+    Dim horizon As Long
+    horizon = totalAssignedLeaves
+    If horizon > scheduleCount Then horizon = scheduleCount
+    
+    Dim uncoveredInsideHorizon As Long
+    Dim i As Long
+    For i = 1 To horizon
+        If dst.Cells(scheduleR(i), scheduleC(i)).Value = src.Cells(scheduleR(i), scheduleC(i)).Value Then
+            uncoveredInsideHorizon = uncoveredInsideHorizon + 1
+        End If
+    Next i
+    
+    If uncoveredInsideHorizon > 0 Then
+        Dim msg As String
+        msg = "Dopustov ni mogoče združiti v neprekinjen blok od datuma upokojitve nazaj." & vbCrLf & _
+              "Nepokritih izmen znotraj ciljanega obdobja: " & uncoveredInsideHorizon & "." & vbCrLf & _
+              "Razlog je lahko v pravilih veljavnosti (npr. L do 30.6. ali G/GL/GP 45 dni prej)."
+        LogDebug msg
+        MsgBox msg, vbExclamation
+    End If
+End Sub
+
+Private Sub CollectRetirementEligibleShifts(ByVal src As Range, ByVal retirementDate As Date, ByRef outDates() As Double, ByRef outR() As Long, ByRef outC() As Long, ByRef outCount As Long)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            If c > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, c)
+            If dt > retirementDate Then GoTo NextCol
+            
+            Dim shiftCode As String
+            shiftCode = Trim$(CStr(src.Cells(r, c).Value))
+            If Len(shiftCode) = 0 Then GoTo NextCol
+            
+            outCount = outCount + 1
+            ReDim Preserve outDates(1 To outCount)
+            ReDim Preserve outR(1 To outCount)
+            ReDim Preserve outC(1 To outCount)
+            outDates(outCount) = CDbl(dt)
+            outR(outCount) = r
+            outC(outCount) = c
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+End Sub
+
+Private Sub SortSchedulesByDateDesc(ByRef dt() As Double, ByRef rr() As Long, ByRef cc() As Long, ByVal cnt As Long)
+    Dim i As Long, j As Long
+    Dim tmpD As Double, tmpL As Long
+    
+    For i = 1 To cnt - 1
+        For j = i + 1 To cnt
+            If dt(j) > dt(i) Then
+                tmpD = dt(i): dt(i) = dt(j): dt(j) = tmpD
+                tmpL = rr(i): rr(i) = rr(j): rr(j) = tmpL
+                tmpL = cc(i): cc(i) = cc(j): cc(j) = tmpL
+            End If
+        Next j
+    Next i
+End Sub
 
 Private Function LeavePriority(ByVal leaveCode As String) As Long
     Dim key As String
