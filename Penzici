@@ -751,6 +751,8 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
         totalRequested = SumRequestedDays(simItems)
 
         Dim totalAssigned As Long, holes As Long
+        totalAssigned = 0
+        holes = 0
         SimulateCoverageFast shiftDates, shiftCount, simItems, candidate, totalAssigned, holes
         
         If holes < bestHoles Or (holes = bestHoles And totalAssigned > bestAssigned) Then
@@ -846,6 +848,8 @@ End Sub
 
 Private Sub SimulateCoverageFast(ByRef shiftDates() As Double, ByVal shiftCount As Long, ByVal items As Collection, ByVal retirementDate As Date, ByRef outAssigned As Long, ByRef outHoles As Long)
     If shiftCount <= 0 Then Exit Sub
+    outAssigned = 0
+    outHoles = 0
     
     Dim lastWorkDate As Date
     lastWorkDate = LastWorkingDay(retirementDate)
