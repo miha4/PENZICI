@@ -730,6 +730,7 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     bestHoles = 999999
     Dim bestAssigned As Long
     bestAssigned = -1
+    Dim bestRequested As Long
     
     Dim d As Long
     Dim maxDay As Long
@@ -744,6 +745,9 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
         Dim simItems As Collection
         Set simItems = BuildSimulationItems(baseItems, candidate, e26Annual)
         SortLeaveItemsByPriority simItems, candidate
+        
+        Dim totalRequested As Long
+        totalRequested = SumRequestedDays(simItems)
 
         Dim totalAssigned As Long, holes As Long
         SimulateCoverageFast shiftDates, shiftCount, simItems, candidate, totalAssigned, holes
@@ -751,6 +755,7 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
         If holes < bestHoles Or (holes = bestHoles And totalAssigned > bestAssigned) Then
             bestHoles = holes
             bestAssigned = totalAssigned
+            bestRequested = totalRequested
             bestDate = candidate
         End If
     Next d
@@ -762,7 +767,8 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     Else
         ShowUserMessage "Predlagan datum upokojitve: " & Format$(bestDate, "dd.mm.yyyy") & vbCrLf & _
                         "Nepokrite izmene v ciljnem obdobju: " & bestHoles & vbCrLf & _
-                        "Skupno planiranih dni dopusta: " & bestAssigned, vbInformation
+                        "Skupno planiranih dni dopusta: " & bestAssigned & vbCrLf & _
+                        "Skupno zahtevanih dni dopusta: " & bestRequested, vbInformation
     End If
     
     Exit Sub
@@ -796,6 +802,13 @@ Private Function BuildSimulationItems(ByVal srcItems As Collection, ByVal candid
         result.Add Array(code, qty, CDate(srcItems(i)(2)))
     Next i
     Set BuildSimulationItems = result
+End Function
+
+Private Function SumRequestedDays(ByVal items As Collection) As Long
+    Dim i As Long
+    For i = 1 To items.Count
+        SumRequestedDays = SumRequestedDays + CLng(items(i)(1))
+    Next i
 End Function
 
 Private Sub CollectEligibleShiftDates(ByVal src As Range, ByVal blocked As Object, ByRef outDates() As Double, ByRef outCodes() As String, ByRef outCount As Long)
@@ -876,17 +889,30 @@ NextShift:
 NextItem:
     Next itIdx
     
-    Dim eligibleBeforeRetirement As Long
+    Dim foundAssigned As Boolean
+    Dim earliestAssigned As Date
+    earliestAssigned = retirementDate
+    
     For i = 1 To shiftCount
-        If CDate(sortedDates(i)) <= retirementDate Then eligibleBeforeRetirement = eligibleBeforeRetirement + 1
+        If assigned(i) And CDate(sortedDates(i)) <= retirementDate Then
+            If Not foundAssigned Then
+                earliestAssigned = CDate(sortedDates(i))
+                foundAssigned = True
+            ElseIf CDate(sortedDates(i)) < earliestAssigned Then
+                earliestAssigned = CDate(sortedDates(i))
+            End If
+        End If
     Next i
     
-    Dim horizon As Long
-    horizon = outAssigned
-    If horizon > eligibleBeforeRetirement Then horizon = eligibleBeforeRetirement
+    If Not foundAssigned Then Exit Sub
     
-    For i = 1 To horizon
+    For i = 1 To shiftCount
+        Dim dt As Date
+        dt = CDate(sortedDates(i))
+        If dt > retirementDate Then GoTo NextHole
+        If dt < earliestAssigned Then GoTo NextHole
         If Not assigned(i) Then outHoles = outHoles + 1
+NextHole:
     Next i
 End Sub
 
