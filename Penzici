@@ -710,8 +710,20 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
         Exit Sub
     End If
     
-    Dim backupDst As Variant
-    backupDst = dst.Value2
+    Dim e26Annual As Double
+    If Not IsNumeric(wS.Range("E26").Value) Then
+        Err.Raise vbObjectError + 803, , "Celica E26 mora vsebovati število letnega dopusta."
+    End If
+    e26Annual = CDbl(wS.Range("E26").Value)
+    
+    Dim shiftDates() As Double
+    Dim shiftCodes() As String
+    Dim shiftCount As Long
+    CollectEligibleShiftDates src, blocked, shiftDates, shiftCodes, shiftCount
+    If shiftCount = 0 Then
+        ShowUserMessage "V razporedu ni izmen za simulacijo.", vbExclamation
+        Exit Sub
+    End If
     
     Dim bestDate As Date
     Dim bestHoles As Long
@@ -728,20 +740,13 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     For d = 1 To maxDay
         Dim candidate As Date
         candidate = DateSerial(CLng(retirementYear), CLng(retirementMonth), d)
-        
-        dst.Value = src.Value
-        dst.Font.Color = vbBlack
-        ClearPostRetirementPlan src, dst, candidate
-        
+
         Dim simItems As Collection
-        Set simItems = CloneLeaveItems(baseItems)
+        Set simItems = BuildSimulationItems(baseItems, candidate, e26Annual)
         SortLeaveItemsByPriority simItems, candidate
-        
-        Dim totalAssigned As Long
-        totalAssigned = SimulateAssignedLeaves(src, dst, blocked, simItems, candidate)
-        
-        Dim holes As Long
-        holes = CountRetirementHoles(src, dst, candidate, totalAssigned)
+
+        Dim totalAssigned As Long, holes As Long
+        SimulateCoverageFast shiftDates, shiftCount, simItems, candidate, totalAssigned, holes
         
         If holes < bestHoles Or (holes = bestHoles And totalAssigned > bestAssigned) Then
             bestHoles = holes
@@ -751,7 +756,6 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     Next d
     
     mSuppressUserMessages = False
-    dst.Value2 = backupDst
     
     If bestDate = 0 Then
         ShowUserMessage "Ni mogoče izračunati predloga datuma upokojitve.", vbExclamation
@@ -765,52 +769,138 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     
 FailHandler:
     mSuppressUserMessages = False
-    On Error Resume Next
-    dst.Value2 = backupDst
-    On Error GoTo 0
     ShowUserMessage "Napaka pri izračunu predloga datuma upokojitve: " & Err.Description, vbCritical
 End Sub
 
-Private Function CloneLeaveItems(ByVal srcItems As Collection) As Collection
+Private Function BuildSimulationItems(ByVal srcItems As Collection, ByVal candidateDate As Date, ByVal e26Annual As Double) As Collection
     Dim result As New Collection
+    Dim yearStart As Date
+    yearStart = DateSerial(Year(candidateDate), 1, 1)
+    Dim elapsedDays As Long
+    elapsedDays = DateDiff("d", yearStart, candidateDate) + 1
+    If elapsedDays < 0 Then elapsedDays = 0
+    
     Dim i As Long
     For i = 1 To srcItems.Count
-        result.Add Array(CStr(srcItems(i)(0)), CLng(srcItems(i)(1)), CDate(srcItems(i)(2)))
+        Dim code As String
+        code = UCase$(Trim$(CStr(srcItems(i)(0))))
+        
+        Dim qty As Long
+        qty = CLng(srcItems(i)(1))
+        
+        If code = "D" Then
+            qty = CLng(Fix((elapsedDays / 365#) * e26Annual))
+            If qty < 0 Then qty = 0
+        End If
+        
+        result.Add Array(code, qty, CDate(srcItems(i)(2)))
     Next i
-    Set CloneLeaveItems = result
+    Set BuildSimulationItems = result
 End Function
 
-Private Function SimulateAssignedLeaves(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal simItems As Collection, ByVal retirementDate As Date) As Long
+Private Sub CollectEligibleShiftDates(ByVal src As Range, ByVal blocked As Object, ByRef outDates() As Double, ByRef outCodes() As String, ByRef outCount As Long)
+    Dim r As Long, c As Long
+    Dim yy As Long, mm As Long
+    Dim lastKnownYear As Long
+    
+    For r = 1 To src.Rows.Count
+        If Not ResolveYearMonthForRow(src.Worksheet, src.Row + r - 1, src.Column, yy, mm, lastKnownYear) Then
+            GoTo NextRow
+        End If
+        
+        For c = 1 To src.Columns.Count
+            If c > Day(DateSerial(yy, mm + 1, 0)) Then GoTo NextCol
+            
+            Dim dt As Date
+            dt = DateSerial(yy, mm, c)
+            
+            Dim shiftCode As String
+            shiftCode = Trim$(CStr(src.Cells(r, c).Value))
+            If Len(shiftCode) = 0 Then GoTo NextCol
+            If blocked.Exists(UCase$(shiftCode)) Then GoTo NextCol
+            
+            outCount = outCount + 1
+            ReDim Preserve outDates(1 To outCount)
+            ReDim Preserve outCodes(1 To outCount)
+            outDates(outCount) = CDbl(dt)
+            outCodes(outCount) = shiftCode
+            
+NextCol:
+        Next c
+NextRow:
+    Next r
+End Sub
+
+Private Sub SimulateCoverageFast(ByRef shiftDates() As Double, ByVal shiftCount As Long, ByVal items As Collection, ByVal retirementDate As Date, ByRef outAssigned As Long, ByRef outHoles As Long)
+    If shiftCount <= 0 Then Exit Sub
+    
+    Dim sortedDates() As Double
+    ReDim sortedDates(1 To shiftCount)
     Dim i As Long
-    For i = 1 To simItems.Count
-        Dim it As Variant
-        it = simItems(i)
-        SimulateAssignedLeaves = SimulateAssignedLeaves + PlanOneLeaveItem(src, dst, blocked, retirementDate, CStr(it(0)), CLng(it(1)), CDate(it(2)))
+    For i = 1 To shiftCount
+        sortedDates(i) = shiftDates(i)
     Next i
-End Function
-
-Private Function CountRetirementHoles(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date, ByVal totalAssigned As Long) As Long
-    If totalAssigned <= 0 Then
-        CountRetirementHoles = 0
-        Exit Function
-    End If
+    SortDateArrayDesc sortedDates, shiftCount
     
-    Dim scheduleDates() As Double
-    Dim scheduleR() As Long
-    Dim scheduleC() As Long
-    Dim scheduleCount As Long
+    Dim assigned() As Boolean
+    ReDim assigned(1 To shiftCount)
     
-    CollectRetirementEligibleShifts src, retirementDate, scheduleDates, scheduleR, scheduleC, scheduleCount
-    If scheduleCount <= 0 Then Exit Function
+    Dim cutoff As Date
+    cutoff = DateAdd("d", -44, retirementDate)
     
-    SortSchedulesByDateDesc scheduleDates, scheduleR, scheduleC, scheduleCount
+    Dim itIdx As Long
+    For itIdx = 1 To items.Count
+        Dim it As Variant
+        it = items(itIdx)
+        
+        Dim code As String
+        code = UCase$(Trim$(CStr(it(0))))
+        Dim qty As Long
+        qty = CLng(it(1))
+        If qty <= 0 Then GoTo NextItem
+        
+        Dim effectiveEnd As Date
+        effectiveEnd = EffectiveEndForSorting(code, CDate(it(2)), retirementDate, cutoff)
+        
+        For i = 1 To shiftCount
+            If qty <= 0 Then Exit For
+            If assigned(i) Then GoTo NextShift
+            If CDate(sortedDates(i)) > retirementDate Then GoTo NextShift
+            If CDate(sortedDates(i)) > effectiveEnd Then GoTo NextShift
+            
+            assigned(i) = True
+            outAssigned = outAssigned + 1
+            qty = qty - 1
+NextShift:
+        Next i
+NextItem:
+    Next itIdx
+    
+    Dim eligibleBeforeRetirement As Long
+    For i = 1 To shiftCount
+        If CDate(sortedDates(i)) <= retirementDate Then eligibleBeforeRetirement = eligibleBeforeRetirement + 1
+    Next i
     
     Dim horizon As Long
-    horizon = totalAssigned
-    If horizon > scheduleCount Then horizon = scheduleCount
+    horizon = outAssigned
+    If horizon > eligibleBeforeRetirement Then horizon = eligibleBeforeRetirement
     
-    CountRetirementHoles = CountUncoveredInHorizon(src, dst, scheduleR, scheduleC, horizon)
-End Function
+    For i = 1 To horizon
+        If Not assigned(i) Then outHoles = outHoles + 1
+    Next i
+End Sub
+
+Private Sub SortDateArrayDesc(ByRef dt() As Double, ByVal cnt As Long)
+    Dim i As Long, j As Long
+    Dim tmpD As Double
+    For i = 1 To cnt - 1
+        For j = i + 1 To cnt
+            If dt(j) > dt(i) Then
+                tmpD = dt(i): dt(i) = dt(j): dt(j) = tmpD
+            End If
+        Next j
+    Next i
+End Sub
 
 Private Sub ShowUserMessage(ByVal text As String, ByVal style As VbMsgBoxStyle)
     If mSuppressUserMessages Then Exit Sub
