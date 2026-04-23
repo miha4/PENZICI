@@ -704,9 +704,6 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     Set src = wS.Range("RazporedDelavca")
     Set dst = wS.Range("VpisiDopuste")
     
-    Dim blocked As Object
-    Set blocked = ParseBlockedShifts(CStr(wS.Range("D12").Value))
-    
     Dim baseItems As Collection
     Set baseItems = ReadLeaveItemsFixed(wS)
     If baseItems.Count = 0 Then
@@ -723,7 +720,7 @@ Public Sub PredlagajNajboljsiDatumUpokojitve()
     Dim shiftDates() As Double
     Dim shiftCodes() As String
     Dim shiftCount As Long
-    CollectEligibleShiftDates src, blocked, shiftDates, shiftCodes, shiftCount
+    CollectEligibleShiftDates src, shiftDates, shiftCodes, shiftCount
     If shiftCount = 0 Then
         ShowUserMessage "V razporedu ni izmen za simulacijo.", vbExclamation
         Exit Sub
@@ -815,7 +812,7 @@ Private Function SumRequestedDays(ByVal items As Collection) As Long
     Next i
 End Function
 
-Private Sub CollectEligibleShiftDates(ByVal src As Range, ByVal blocked As Object, ByRef outDates() As Double, ByRef outCodes() As String, ByRef outCount As Long)
+Private Sub CollectEligibleShiftDates(ByVal src As Range, ByRef outDates() As Double, ByRef outCodes() As String, ByRef outCount As Long)
     Dim r As Long, c As Long
     Dim yy As Long, mm As Long
     Dim lastKnownYear As Long
@@ -834,7 +831,6 @@ Private Sub CollectEligibleShiftDates(ByVal src As Range, ByVal blocked As Objec
             Dim shiftCode As String
             shiftCode = Trim$(CStr(src.Cells(r, c).Value))
             If Len(shiftCode) = 0 Then GoTo NextCol
-            If blocked.Exists(UCase$(shiftCode)) Then GoTo NextCol
             
             outCount = outCount + 1
             ReDim Preserve outDates(1 To outCount)
