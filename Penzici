@@ -2,6 +2,7 @@
 Option Explicit
 
 Private Const DEBUG_MODE As Boolean = True
+Private mSuppressUserMessages As Boolean
 
 '========================================================================
 '============= PRIPRAVI PREDLOG IZRABE DOPUSTA PRED PENZIJO =============
@@ -298,10 +299,10 @@ NextRow:
     If remaining > 0 Then
         If Not hasValidityWindow Then
             LogDebug "[" & leaveCode & "] ZAKLJUČEK: ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy")
-            MsgBox "Za tip '" & leaveCode & "' planiranje ni možno: v tabeli ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy") & ".", vbInformation
+        ShowUserMessage "Za tip '" & leaveCode & "' planiranje ni možno: v tabeli ni termina do " & Format$(effectiveEndDate, "dd.mm.yyyy") & ".", vbInformation
         Else
             LogDebug "[" & leaveCode & "] ZAKLJUČEK: premalo dni, manjka " & remaining
-            MsgBox "Za tip '" & leaveCode & "' ni dovolj prostih dni. Manjka: " & remaining, vbInformation
+            ShowUserMessage "Za tip '" & leaveCode & "' ni dovolj prostih dni. Manjka: " & remaining, vbInformation
         End If
     Else
         LogDebug "[" & leaveCode & "] ZAKLJUČEK: uspešno razporejeno."
@@ -402,7 +403,7 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
     Dim actualDiff As Long
     actualDiff = DateDiff("d", cutoffDate, retirementDate)
     If actualDiff <> 44 Then
-        Err.Raise vbObjectError + 703, , "Neujemanje MEJA G: razlika ni 45 dni (trenutno: " & actualDiff & ")."
+        Err.Raise vbObjectError + 703, , "Neujemanje MEJA G: razlika ni 44 dni (trenutno: " & actualDiff & ")."
     End If
     
     Dim r As Long, c As Long
@@ -431,7 +432,7 @@ Private Sub HighlightImportantDates(ByVal src As Range, ByVal dst As Range, ByVa
             ElseIf dt = cutoffDate Then
                 MarkCellImportant dst.Cells(r, c), "MEJA G (" & actualDiff & " dni prej)"
                 foundCutoff = True
-                LogDebug "Označen datum 45 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
+                LogDebug "Označen datum 44 dni pred upokojitvijo v VpisiDopuste: " & Format$(dt, "dd.mm.yyyy")
             End If
             
 NextCol:
@@ -443,7 +444,7 @@ NextRow:
         LogDebug "Datum upokojitve ni viden v območju VpisiDopuste: " & Format$(retirementDate, "dd.mm.yyyy")
     End If
     If Not foundCutoff Then
-        LogDebug "Datum 45 dni pred upokojitvijo ni viden v območju VpisiDopuste: " & Format$(cutoffDate, "dd.mm.yyyy")
+        LogDebug "Datum 44 dni pred upokojitvijo ni viden v območju VpisiDopuste: " & Format$(cutoffDate, "dd.mm.yyyy")
     End If
 End Sub
 
@@ -570,8 +571,8 @@ Private Function ApplyLeaveTypeHardStops(ByVal leaveCode As String, ByVal effect
     resultDate = effectiveEnd
     
     If (UCase$(Trim$(leaveCode)) = "G" Or UCase$(Trim$(leaveCode)) = "GL" Or UCase$(Trim$(leaveCode)) = "GP") Then
-        If DateAdd("d", -1, gCutoffDate) < resultDate Then
-            resultDate = DateAdd("d", -1, gCutoffDate)
+        If gCutoffDate < resultDate Then
+            resultDate = gCutoffDate
         End If
     End If
     
@@ -605,22 +606,26 @@ Private Sub WarnIfLeavesCannotBeCombined(ByVal src As Range, ByVal dst As Range,
     If horizon > scheduleCount Then horizon = scheduleCount
     
     Dim uncoveredInsideHorizon As Long
-    Dim i As Long
-    For i = 1 To horizon
-        If dst.Cells(scheduleR(i), scheduleC(i)).Value = src.Cells(scheduleR(i), scheduleC(i)).Value Then
-            uncoveredInsideHorizon = uncoveredInsideHorizon + 1
-        End If
-    Next i
+    uncoveredInsideHorizon = CountUncoveredInHorizon(src, dst, scheduleR, scheduleC, horizon)
     
     If uncoveredInsideHorizon > 0 Then
         Dim msg As String
         msg = "Dopustov ni mogoče združiti v neprekinjen blok od datuma upokojitve nazaj." & vbCrLf & _
               "Nepokritih izmen znotraj ciljanega obdobja: " & uncoveredInsideHorizon & "." & vbCrLf & _
-              "Razlog je lahko v pravilih veljavnosti (npr. L do 30.6. ali G/GL/GP 45 dni prej)."
+              "Razlog je lahko v pravilih veljavnosti (npr. L do 30.6. ali G/GL/GP 44 dni prej)."
         LogDebug msg
-        MsgBox msg, vbExclamation
+        ShowUserMessage msg, vbExclamation
     End If
 End Sub
+
+Private Function CountUncoveredInHorizon(ByVal src As Range, ByVal dst As Range, ByRef scheduleR() As Long, ByRef scheduleC() As Long, ByVal horizon As Long) As Long
+    Dim i As Long
+    For i = 1 To horizon
+        If dst.Cells(scheduleR(i), scheduleC(i)).Value = src.Cells(scheduleR(i), scheduleC(i)).Value Then
+            CountUncoveredInHorizon = CountUncoveredInHorizon + 1
+        End If
+    Next i
+End Function
 
 Private Sub CollectRetirementEligibleShifts(ByVal src As Range, ByVal retirementDate As Date, ByRef outDates() As Double, ByRef outR() As Long, ByRef outC() As Long, ByRef outCount As Long)
     Dim r As Long, c As Long
@@ -670,6 +675,146 @@ Private Sub SortSchedulesByDateDesc(ByRef dt() As Double, ByRef rr() As Long, By
             End If
         Next j
     Next i
+End Sub
+
+Public Sub PredlagajNajboljsiDatumUpokojitve()
+    On Error GoTo FailHandler
+    
+    Dim wS As Worksheet
+    Set wS = ActiveSheet
+    
+    Dim retirementMonth As Variant, retirementYear As Variant
+    retirementMonth = Application.InputBox("Vnesi mesec upokojitve (1-12):", "Predlog datuma upokojitve", Month(Date), , , , , 1)
+    If retirementMonth = False Then Exit Sub
+    retirementYear = Application.InputBox("Vnesi leto upokojitve (npr. 2026):", "Predlog datuma upokojitve", Year(Date), , , , , 1)
+    If retirementYear = False Then Exit Sub
+    
+    If CLng(retirementMonth) < 1 Or CLng(retirementMonth) > 12 Then
+        Err.Raise vbObjectError + 801, , "Mesec mora biti med 1 in 12."
+    End If
+    If CLng(retirementYear) < 1900 Then
+        Err.Raise vbObjectError + 802, , "Leto upokojitve ni veljavno."
+    End If
+    
+    Dim src As Range, dst As Range
+    Set src = wS.Range("RazporedDelavca")
+    Set dst = wS.Range("VpisiDopuste")
+    
+    Dim blocked As Object
+    Set blocked = ParseBlockedShifts(CStr(wS.Range("D12").Value))
+    
+    Dim baseItems As Collection
+    Set baseItems = ReadLeaveItemsFixed(wS)
+    If baseItems.Count = 0 Then
+        ShowUserMessage "Ni dopustov za simulacijo (E5:E9).", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim backupDst As Variant
+    backupDst = dst.Value2
+    
+    Dim bestDate As Date
+    Dim bestHoles As Long
+    bestHoles = 999999
+    Dim bestAssigned As Long
+    bestAssigned = -1
+    
+    Dim d As Long
+    Dim maxDay As Long
+    maxDay = Day(DateSerial(CLng(retirementYear), CLng(retirementMonth) + 1, 0))
+    
+    mSuppressUserMessages = True
+    
+    For d = 1 To maxDay
+        Dim candidate As Date
+        candidate = DateSerial(CLng(retirementYear), CLng(retirementMonth), d)
+        
+        dst.Value = src.Value
+        dst.Font.Color = vbBlack
+        ClearPostRetirementPlan src, dst, candidate
+        
+        Dim simItems As Collection
+        Set simItems = CloneLeaveItems(baseItems)
+        SortLeaveItemsByPriority simItems, candidate
+        
+        Dim totalAssigned As Long
+        totalAssigned = SimulateAssignedLeaves(src, dst, blocked, simItems, candidate)
+        
+        Dim holes As Long
+        holes = CountRetirementHoles(src, dst, candidate, totalAssigned)
+        
+        If holes < bestHoles Or (holes = bestHoles And totalAssigned > bestAssigned) Then
+            bestHoles = holes
+            bestAssigned = totalAssigned
+            bestDate = candidate
+        End If
+    Next d
+    
+    mSuppressUserMessages = False
+    dst.Value2 = backupDst
+    
+    If bestDate = 0 Then
+        ShowUserMessage "Ni mogoče izračunati predloga datuma upokojitve.", vbExclamation
+    Else
+        ShowUserMessage "Predlagan datum upokojitve: " & Format$(bestDate, "dd.mm.yyyy") & vbCrLf & _
+                        "Nepokrite izmene v ciljnem obdobju: " & bestHoles & vbCrLf & _
+                        "Skupno planiranih dni dopusta: " & bestAssigned, vbInformation
+    End If
+    
+    Exit Sub
+    
+FailHandler:
+    mSuppressUserMessages = False
+    On Error Resume Next
+    dst.Value2 = backupDst
+    On Error GoTo 0
+    ShowUserMessage "Napaka pri izračunu predloga datuma upokojitve: " & Err.Description, vbCritical
+End Sub
+
+Private Function CloneLeaveItems(ByVal srcItems As Collection) As Collection
+    Dim result As New Collection
+    Dim i As Long
+    For i = 1 To srcItems.Count
+        result.Add Array(CStr(srcItems(i)(0)), CLng(srcItems(i)(1)), CDate(srcItems(i)(2)))
+    Next i
+    Set CloneLeaveItems = result
+End Function
+
+Private Function SimulateAssignedLeaves(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal simItems As Collection, ByVal retirementDate As Date) As Long
+    Dim i As Long
+    For i = 1 To simItems.Count
+        Dim it As Variant
+        it = simItems(i)
+        SimulateAssignedLeaves = SimulateAssignedLeaves + PlanOneLeaveItem(src, dst, blocked, retirementDate, CStr(it(0)), CLng(it(1)), CDate(it(2)))
+    Next i
+End Function
+
+Private Function CountRetirementHoles(ByVal src As Range, ByVal dst As Range, ByVal retirementDate As Date, ByVal totalAssigned As Long) As Long
+    If totalAssigned <= 0 Then
+        CountRetirementHoles = 0
+        Exit Function
+    End If
+    
+    Dim scheduleDates() As Double
+    Dim scheduleR() As Long
+    Dim scheduleC() As Long
+    Dim scheduleCount As Long
+    
+    CollectRetirementEligibleShifts src, retirementDate, scheduleDates, scheduleR, scheduleC, scheduleCount
+    If scheduleCount <= 0 Then Exit Function
+    
+    SortSchedulesByDateDesc scheduleDates, scheduleR, scheduleC, scheduleCount
+    
+    Dim horizon As Long
+    horizon = totalAssigned
+    If horizon > scheduleCount Then horizon = scheduleCount
+    
+    CountRetirementHoles = CountUncoveredInHorizon(src, dst, scheduleR, scheduleC, horizon)
+End Function
+
+Private Sub ShowUserMessage(ByVal text As String, ByVal style As VbMsgBoxStyle)
+    If mSuppressUserMessages Then Exit Sub
+    MsgBox text, style
 End Sub
 
 Private Function LeavePriority(ByVal leaveCode As String) As Long
