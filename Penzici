@@ -851,6 +851,9 @@ End Sub
 Private Sub SimulateCoverageFast(ByRef shiftDates() As Double, ByVal shiftCount As Long, ByVal items As Collection, ByVal retirementDate As Date, ByRef outAssigned As Long, ByRef outHoles As Long)
     If shiftCount <= 0 Then Exit Sub
     
+    Dim lastWorkDate As Date
+    lastWorkDate = LastWorkingDay(retirementDate)
+    
     Dim sortedDates() As Double
     ReDim sortedDates(1 To shiftCount)
     Dim i As Long
