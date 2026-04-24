@@ -86,12 +86,12 @@ Public Sub PripraviPredlogIzrabe()
         SetLoaderProgress 30 + CLng((i - 1) * 60 / planItems.Count), "Planiram tip " & CStr(planItems(i)(0)) & "..."
         Dim item As Variant
         item = planItems(i) ' item(0)=Code, item(1)=Qty, item(2)=ValidUntil
-        LogDebug "Začenjam tip: " & CStr(item(0)) & ", qty=" & CLng(item(1)) & ", veljavnost=" & Format$(CDate(item(2)), "dd.mm.yyyy")
+        LogDebug "Začenjam tip: " & CStr(item(0)) & ", qty=" & CLng(item(1)) & ", veljavnost=" & Format$(CDate(item(2)), "dd.mm.yyyy") & ", začetek=" & Format$(CDate(item(3)), "dd.mm.yyyy")
         'GLAVNI DEL MAKROJA, PLANIRANJE DOPUSTA; VHODNI PODATKI: RazporedDelavca, matrika VpisiDopuste, blokirane izmene, Upokojitveni datum,
         ' item(0) - oznaka dopusta, item(1) - stevilo dni, item(2) - veljaven do
         'FunkcijaPlanOneLeaveItem vrne splanirane dopuste, kar zapišemo v assignedQty
         Dim assignedQty As Long
-        assignedQty = PlanOneLeaveItem(src, dst, blocked, retirementDate, CStr(item(0)), CLng(item(1)), CDate(item(2)))
+        assignedQty = PlanOneLeaveItem(src, dst, blocked, retirementDate, CStr(item(0)), CLng(item(1)), CDate(item(2)), CDate(item(3)))
         'Zapisemo planirane dopuste
         WriteAssignedQty wS, CStr(item(0)), assignedQty
         totalAssigned = totalAssigned + assignedQty
@@ -130,23 +130,30 @@ Private Function ReadLeaveItemsFixed(ByVal wS As Worksheet) As Collection
     Dim result As New Collection
     
     '5x pokliče AddLeaveIfAny:
-    AddLeaveIfAny result, wS.Range("D5").Value, wS.Range("E5").Value, wS.Range("F5").Value
-    AddLeaveIfAny result, wS.Range("D6").Value, wS.Range("E6").Value, wS.Range("F6").Value
-    AddLeaveIfAny result, wS.Range("D7").Value, wS.Range("E7").Value, wS.Range("F7").Value
-    AddLeaveIfAny result, wS.Range("D8").Value, wS.Range("E8").Value, wS.Range("F8").Value
-    AddLeaveIfAny result, wS.Range("D9").Value, wS.Range("E9").Value, wS.Range("F9").Value
+    AddLeaveIfAny result, wS.Range("D5").Value, wS.Range("E5").Value, wS.Range("F5").Value, wS.Range("C5").Value
+    AddLeaveIfAny result, wS.Range("D6").Value, wS.Range("E6").Value, wS.Range("F6").Value, wS.Range("C6").Value
+    AddLeaveIfAny result, wS.Range("D7").Value, wS.Range("E7").Value, wS.Range("F7").Value, wS.Range("C7").Value
+    AddLeaveIfAny result, wS.Range("D8").Value, wS.Range("E8").Value, wS.Range("F8").Value, wS.Range("C8").Value
+    AddLeaveIfAny result, wS.Range("D9").Value, wS.Range("E9").Value, wS.Range("F9").Value, wS.Range("C9").Value
 
     Set ReadLeaveItemsFixed = result
 End Function
 'Funkcija pridobi: prazen seznam result, leaveCode = "L, D,...", qtyVal = 5,... validVal = 31.12.2026
-Private Sub AddLeaveIfAny(ByRef col As Collection, ByVal leaveCode As String, ByVal qtyVal As Variant, ByVal validVal As Variant)
+Private Sub AddLeaveIfAny(ByRef col As Collection, ByVal leaveCode As String, ByVal qtyVal As Variant, ByVal validVal As Variant, ByVal leaveYearVal As Variant)
     If Not IsNumeric(qtyVal) Then Exit Sub
     If CLng(qtyVal) <= 0 Then Exit Sub
     If Not IsDate(validVal) Then
         Err.Raise vbObjectError + 601, , "Veljavnost ni datum za tip " & leaveCode & "."
     End If
+    If Not IsNumeric(leaveYearVal) Or CLng(leaveYearVal) < 1900 Then
+        Err.Raise vbObjectError + 602, , "Leto dopusta ni veljavno za tip " & leaveCode & "."
+    End If
+
+    Dim leaveStartDate As Date
+    leaveStartDate = DateSerial(CLng(leaveYearVal), 1, 1)
+
     'dodajanje v seznam
-    col.Add Array(leaveCode, CLng(qtyVal), DateValue(CDate(validVal)))
+    col.Add Array(leaveCode, CLng(qtyVal), DateValue(CDate(validVal)), leaveStartDate)
 End Sub
 
 Private Function ParseBlockedShifts(ByVal raw As String) As Object
@@ -173,8 +180,8 @@ End Function
 '====================================================================================================================
 ' ========================== GLAVNI MOTOR MAKROJA: PISANJE DOPUSTOV =================================================
 '====================================================================================================================
-Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date) As Long
-    PlanOneLeaveItem = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, leaveCode, leaveQty, validUntil, DateSerial(1900, 1, 1), LastWorkingDay(retirementDate), True)
+Private Function PlanOneLeaveItem(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date, ByVal leaveStartDate As Date) As Long
+    PlanOneLeaveItem = PlanOneLeaveItemWithWindow(src, dst, blocked, retirementDate, leaveCode, leaveQty, validUntil, leaveStartDate, LastWorkingDay(retirementDate), True)
 End Function
 
 Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Range, ByVal blocked As Object, ByVal retirementDate As Date, ByVal leaveCode As String, ByVal leaveQty As Long, ByVal validUntil As Date, ByVal windowStart As Date, ByVal windowEnd As Date, ByVal reverseOrder As Boolean) As Long
@@ -240,11 +247,22 @@ Private Function PlanOneLeaveItemWithWindow(ByVal src As Range, ByVal dst As Ran
                      " | shift='" & shiftCode & "' | remaining=" & remaining
             
             'pogleda če je dan ustrezen:
-            'a) če je po zadnjem mogočem datumu za ta tip dopusta
+            'a) če je pred začetkom veljavnega obdobja za ta tip dopusta
+            If dt < windowStart Then
+                LogDebug "  -> preskok (pred začetkom obdobja: " & Format$(windowStart, "dd.mm.yyyy") & ")"
+                GoTo NextCol
+            End If
+            'b) če je po zadnjem mogočem datumu za ta tip dopusta
             If dt > effectiveEndDate Then
                 LogDebug "  -> preskok (po zadnjem možnem datumu: " & Format$(effectiveEndDate, "dd.mm.yyyy") & ")"
                 GoTo NextCol
             End If
+            'c) če je po koncu planirnega okna
+            If dt > windowEnd Then
+                LogDebug "  -> preskok (po koncu planirnega okna: " & Format$(windowEnd, "dd.mm.yyyy") & ")"
+                GoTo NextCol
+            End If
+
             'Če najdemo vsaj 1 datum, ki je datumsko še mogoč
             hasValidityWindow = True
             
@@ -802,7 +820,7 @@ Private Function BuildSimulationItems(ByVal srcItems As Collection, ByVal candid
             If qty < 0 Then qty = 0
         End If
         
-        result.Add Array(code, qty, CDate(srcItems(i)(2)))
+        result.Add Array(code, qty, CDate(srcItems(i)(2)), CDate(srcItems(i)(3)))
     Next i
     Set BuildSimulationItems = result
 End Function
@@ -881,11 +899,15 @@ Private Sub SimulateCoverageFast(ByRef shiftDates() As Double, ByVal shiftCount 
         
         Dim effectiveEnd As Date
         effectiveEnd = EffectiveEndForSorting(code, CDate(it(2)), retirementDate, cutoff)
-        
+
+        Dim leaveStartDate As Date
+        leaveStartDate = CDate(it(3))
+
         For i = 1 To shiftCount
             If qty <= 0 Then Exit For
             If assigned(i) Then GoTo NextShift
             If CDate(sortedDates(i)) > lastWorkDate Then GoTo NextShift
+            If CDate(sortedDates(i)) < leaveStartDate Then GoTo NextShift
             If CDate(sortedDates(i)) > effectiveEnd Then GoTo NextShift
             
             assigned(i) = True
